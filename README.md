@@ -1,5 +1,6 @@
 # Agents Core
 
+![](https://raw.githubusercontent.com/MedTriage/agents-core/main/assets/logo.png)
 
 > Agentic AI for clinical triage, drug discovery, and remote digital healthcare, with a graduated autonomy architecture
 
@@ -27,6 +28,10 @@ The system is built on a multi-agent architecture, built using LangGraph :
 - **Level-I** - Simple queries and chitchat, directly answered to patient
 - **Level-II** - Most clinical queries, where the critic's analysis is sent to a doctor who verifies and approves it and sends it back to the patient
 - **Level-III** - Potential Life-threatening scenarios, the agents lock themselves and communicate with local authorities in order to provide assistance to the patient
+
+### Architecture Diagram
+
+![](https://raw.githubusercontent.com/MedTriage/agents-core/main/assets/flow.png)
 
 ## Getting Started
 
