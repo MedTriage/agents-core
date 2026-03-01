@@ -6,3 +6,7 @@ google-genai
 python-dotenv
 pydantic
 tenacity
+openai
+pinecone
+pypdf
+tiktoken
