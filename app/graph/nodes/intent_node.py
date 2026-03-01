@@ -97,7 +97,7 @@ def intent_node(state):
 
     except Exception as e:
         # Fallback
-
+        print(e)
         state["intent_type"] = "clinical_query"
         state["intent_confidence"] = 0.0
         state["intent_error"] = str(e)
