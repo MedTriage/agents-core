@@ -6,3 +6,4 @@ google-genai
 python-dotenv
 pydantic
 tenacity
+openai
