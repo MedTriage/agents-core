@@ -115,7 +115,25 @@ def call_model(prompt: str):
 
 def intent_node(state):
     user_input = state["user_input"]
-    prompt = INTENT_PROMPT + user_input
+    chat_history = state.get("chat_history", []) or []
+
+    # Include recent history so follow-ups like "no pain, 5 lesions" are
+    # correctly classified as clinical_query, not chitchat
+    if chat_history:
+        history_lines = []
+        for msg in chat_history[-4:]:  # last 2 exchanges
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            history_lines.append(f"{role}: {content}")
+        context_prefix = (
+            "(Conversation context:\n"
+            + "\n".join(history_lines)
+            + ")\n\nCurrent message: "
+        )
+    else:
+        context_prefix = ""
+
+    prompt = INTENT_PROMPT + context_prefix + user_input
 
     try:
         raw_output = call_model(prompt)

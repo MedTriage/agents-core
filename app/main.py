@@ -9,6 +9,7 @@ graph = build_graph()
 
 class InputRequest(BaseModel):
     text: str
+    chat_history: list[dict] = []
 
 # Home route
 @app.get("/")  
@@ -19,6 +20,7 @@ def read_root():
 @app.post("/process")
 def process_input(request: InputRequest):
     result = graph.invoke({
-        "user_input": request.text
+        "user_input": request.text,
+        "chat_history": request.chat_history
     })
     return result

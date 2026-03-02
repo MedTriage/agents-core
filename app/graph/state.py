@@ -3,12 +3,21 @@ from typing import TypedDict, Optional
 
 class AgentState(TypedDict):
     user_input: str
+    chat_history: Optional[list]  # [{"role": "user"|"assistant", "content": "..."}]
 
     # Intent
     intent_type: Optional[str]
     intent_confidence: Optional[float]
 
-    # Downstream outputs 
-    rag_output: Optional[str]
+    # Retrieved context (passed from RAG to Critic for verification)
+    retrieved_context: Optional[str]
+
+    # Downstream outputs
+    rag_output: Optional[dict]
     image_output: Optional[str]
     companion_output: Optional[str]
+
+    # Critic feedback
+    critic_output: Optional[dict]
+    critic_decision: Optional[str]
+    critic_response: Optional[str]
