@@ -104,6 +104,40 @@ def critic_node(state):
         }
         return state
 
+    # If RAG requested clarification, pass it through directly —
+    # do NOT override with a clinical response the RAG intentionally withheld
+    probable_diagnosis = str(rag_output.get("probable_diagnosis", "")).lower()
+    if "clarification needed" in probable_diagnosis or "insufficient detail" in probable_diagnosis:
+        # Use the RAG's follow-up questions as the response
+        follow_up_questions = rag_output.get("recommended_actions", [])
+        differentials = rag_output.get("differentials", [])
+
+        if differentials:
+            diff_text = ", ".join(differentials)
+            response = (
+                f"To better assess your situation, I need a few more details. "
+                f"Based on initial review, possible conditions include {diff_text}, "
+                f"but more information is needed to narrow this down. "
+                + " ".join(follow_up_questions)
+            )
+        else:
+            response = (
+                "I need a bit more information to provide an accurate assessment. "
+                + " ".join(follow_up_questions)
+            )
+
+        state["critic_decision"] = "approve"
+        state["critic_response"] = response
+        state["critic_output"] = {
+            "response": response,
+            "is_supported": True,
+            "issues": [],
+            "safety_risk": "low",
+            "decision": "approve",
+            "confidence_adjusted": 0.0
+        }
+        return state
+
     # Build the full prompt with all three inputs
     prompt = (
         CRITIC_PROMPT

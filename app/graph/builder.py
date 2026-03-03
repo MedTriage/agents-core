@@ -7,6 +7,7 @@ from app.graph.nodes.rag_node import rag_node
 from app.graph.nodes.image_node import image_node
 from app.graph.nodes.companion_node import companion_node
 from app.graph.nodes.critic_node import critic_node
+from app.graph.nodes.guardian_node import guardian_node
 
 
 def route_after_intent(state: AgentState):
@@ -32,6 +33,7 @@ def build_graph():
     builder.add_node("image_node", image_node)
     builder.add_node("companion_node", companion_node)
     builder.add_node("critic_node", critic_node)
+    builder.add_node("guardian_node", guardian_node)
 
     builder.set_entry_point("intent_router")
 
@@ -46,8 +48,9 @@ def build_graph():
     )
 
     builder.add_edge("rag_node", "critic_node")
+    builder.add_edge("critic_node", "guardian_node")
 
-    builder.set_finish_point("critic_node")
+    builder.set_finish_point("guardian_node")
     builder.set_finish_point("image_node")
     builder.set_finish_point("companion_node")
 
