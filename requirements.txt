@@ -10,3 +10,4 @@ openai
 pinecone
 pypdf
 tiktoken
+langsmith
