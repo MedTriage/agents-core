@@ -21,3 +21,7 @@ class AgentState(TypedDict):
     critic_output: Optional[dict]
     critic_decision: Optional[str]
     critic_response: Optional[str]
+
+    # Guardian analysis
+    guardian_output: Optional[dict]
+    triage_level: Optional[str]
