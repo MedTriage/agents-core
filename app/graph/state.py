@@ -5,6 +5,9 @@ class AgentState(TypedDict):
     user_input: str
     chat_history: Optional[list]  # [{"role": "user"|"assistant", "content": "..."}]
 
+    # Title
+    title: Optional[str]
+
     # Intent
     intent_type: Optional[str]
     intent_confidence: Optional[float]
