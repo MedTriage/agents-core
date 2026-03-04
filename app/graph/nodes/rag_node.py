@@ -29,22 +29,28 @@ You are given retrieved medical context below and a user query. Your job is to:
 - State the severity and urgency level clearly.
 
 === VAGUE QUERY HANDLING ===
-- If the user query lacks sufficient clinical detail to narrow to a specific
-  diagnosis (e.g., "I have a rash", "my stomach hurts", "I feel sick"), do NOT
-  pick a diagnosis and fabricate supporting symptoms the user never mentioned.
+- IMPORTANT: When conversation history is provided, evaluate the COMBINED context
+  from the entire conversation, not just the latest message. If earlier messages
+  establish a clinical concern and the latest message provides additional details
+  or answers previous questions, that IS sufficient detail — provide an assessment.
+- Only trigger clarification when the TOTAL conversation context (all messages
+  combined) lacks sufficient detail to provide a useful clinical response.
+- If the user query (considering full history) lacks sufficient clinical detail
+  to narrow to a specific diagnosis (e.g., first message is "I have a rash"
+  with no history), do NOT pick a diagnosis and fabricate supporting symptoms
+  the user never mentioned.
 - If the user asks about a condition by name but does NOT report any personal
-  symptoms (e.g., "Can you advise me on mpox?", "Tell me about diabetes",
-  "What is dengue?"), do NOT assume they have the condition. Instead, ask what
-  symptoms they are experiencing so you can provide a relevant assessment.
+  symptoms AND there is no conversation history providing context (e.g., "Can
+  you advise me on mpox?"), do NOT assume they have the condition. Ask what
+  symptoms they are experiencing.
   Asking about a disease ≠ having that disease.
-- In both cases above, use the retrieved context to identify which
+- When clarification IS needed, use the retrieved context to identify which
   differentiating details matter most, then:
   - Set probable_diagnosis to "Insufficient detail — clarification needed"
   - Set differentials to the range of plausible conditions from the context
-  - Set recommended_actions to specific follow-up questions that would narrow
-    the assessment (e.g., "Are you experiencing any symptoms of mpox such as
-    rash, fever, or swollen lymph nodes?", "Have you had contact with a
-    confirmed case?")
+  - Set recommended_actions to ONLY follow-up questions — do NOT mix clinical
+    recommendations (drug names, treatments, prevention advice) into follow-up
+    questions. Questions and clinical advice are separate output types.
   - Set confidence to 0.0
 - NEVER attribute symptoms, descriptions, or history to the user that they did
   not explicitly state. "Based on your description of..." is only valid if the
@@ -108,6 +114,17 @@ def rag_node(state):
     query = state["user_input"]
     chat_history = state.get("chat_history", []) or []
 
+    # Re-retrieval loop: if the critic sent us back, use the refinement hint
+    refinement_hint = state.get("critic_refinement_hint")
+    is_retry = state.get("rag_output") is not None
+
+    if is_retry:
+        state["rag_retry_count"] = (state.get("rag_retry_count", 0) or 0) + 1
+        state["critic_refinement_hint"] = None  # Clear after consuming
+
+    # Augment the retrieval query with the critic's hint on retries
+    retrieval_query = f"{query} {refinement_hint}" if refinement_hint else query
+
     # Build a contextualized query from conversation history
     # so follow-up messages like "no pain, 5 lesions" include prior context
     if chat_history:
@@ -124,10 +141,9 @@ def rag_node(state):
     else:
         contextualized_query = query
 
-    # Use the current message for retrieval (most relevant to vector search)
-    # but also try the contextualized version if history exists
+    # Use the retrieval query for vector search (augmented with critic hint on retries)
     try:
-        docs = retrieve(query)
+        docs = retrieve(retrieval_query)
     except Exception as e:
         state["rag_output"] = {"error": f"Retrieval failed: {str(e)}"}
         return state

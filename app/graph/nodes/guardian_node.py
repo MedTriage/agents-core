@@ -97,7 +97,17 @@ def guardian_node(state):
         return state
 
     # Emergency or escalation → level_3 immediately, no LLM needed
-    if intent_type == "emergency" or decision == "escalate" or safety_risk == "high" or confidence < 0.3:
+    # Note: low confidence alone only triggers level_3 if the critic also
+    # escalated or flagged high safety risk. A "revise" with low confidence
+    # is routed to level_2 (physician review) rather than locking the system.
+    hard_level_3 = (
+        intent_type == "emergency"
+        or decision == "escalate"
+        or safety_risk == "high"
+        or (confidence < 0.3 and decision != "revise")
+    )
+
+    if hard_level_3:
         level = "level_3"
         reasoning = _build_hard_rule_reasoning(intent_type, decision, safety_risk, confidence)
         state["triage_level"] = level
@@ -106,6 +116,17 @@ def guardian_node(state):
             "reasoning": reasoning,
             "requires_doctor": True,
             "ai_lock": True
+        }
+        return state
+
+    # "revise" with low confidence → level_2 (physician review, not locked)
+    if decision == "revise" and confidence < 0.3:
+        state["triage_level"] = "level_2"
+        state["guardian_output"] = {
+            "triage_level": "level_2",
+            "reasoning": "Critic flagged revise with low confidence — requires physician review but not an emergency.",
+            "requires_doctor": True,
+            "ai_lock": False
         }
         return state
 

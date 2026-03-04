@@ -67,15 +67,34 @@ Rewrite the clinical assessment into a clear, authoritative, patient-friendly re
   "issues": ["<issue 1>", "<issue 2>"],
   "safety_risk": "<low | moderate | high>",
   "decision": "<approve | revise | escalate>",
-  "confidence_adjusted": <float 0.0-1.0, your adjusted confidence after review>
+  "confidence_adjusted": <float 0.0-1.0, your adjusted confidence after review>,
+  "refinement_hint": "<when decision is 'revise': a specific query or keywords the RAG should use to retrieve better evidence on the next attempt. null if decision is not 'revise'>"
 }
 
 Decision criteria:
 - "approve": RAG output is evidence-aligned, safe, and complete.
-- "revise": Minor issues (missing nuance, incomplete info) — still safe to show
-  with caveats. Include caveats in the synthesized response.
+- "revise": Minor issues (missing nuance, incomplete info, or weak retrieval).
+  The system will automatically re-retrieve using your refinement_hint and
+  re-run the RAG analysis. Provide a specific, actionable hint describing what
+  information is missing or what to search for differently.
 - "escalate": Unsafe recommendations, hallucinated claims, or high safety risk —
   must be reviewed by a physician before showing to patient.
+
+=== CONFIDENCE CALIBRATION (critical) ===
+confidence_adjusted reflects how clinically valid the OVERALL assessment is, not
+whether every minor detail is perfect:
+- 0.0: Completely unsupported, fabricated, or dangerously wrong. ONLY use 0.0
+  when the diagnosis has no basis in the retrieved context or the user's stated
+  symptoms, OR when asking for clarification (no diagnosis made).
+- 0.1-0.3: Mostly unsupported — major claims lack evidence.
+- 0.4-0.6: Partially supported — correct direction but significant gaps or
+  assumptions.
+- 0.7-0.8: Well-supported with minor gaps or caveats (typical for "revise").
+- 0.9-1.0: Strongly supported by retrieved evidence.
+Do NOT drop confidence to 0.0 merely because the RAG made reasonable clinical
+inferences from stated symptoms, or because the user's phrasing was imprecise
+(e.g., saying "99 degrees" instead of "low-grade fever"). A "revise" decision
+with minor issues should typically have confidence 0.5-0.8, not 0.0.
 """
 
 @retry_on_exception
@@ -181,6 +200,10 @@ def critic_node(state):
         state["critic_output"] = parsed
         state["critic_decision"] = parsed["decision"]
         state["critic_response"] = parsed["response"]
+
+        # Store refinement hint for the re-retrieval loop
+        if parsed.get("decision") == "revise" and parsed.get("refinement_hint"):
+            state["critic_refinement_hint"] = parsed["refinement_hint"]
 
     except Exception as e:
         # If critic fails, escalate to be safe
