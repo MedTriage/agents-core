@@ -114,6 +114,17 @@ def rag_node(state):
     query = state["user_input"]
     chat_history = state.get("chat_history", []) or []
 
+    # Re-retrieval loop: if the critic sent us back, use the refinement hint
+    refinement_hint = state.get("critic_refinement_hint")
+    is_retry = state.get("rag_output") is not None
+
+    if is_retry:
+        state["rag_retry_count"] = (state.get("rag_retry_count", 0) or 0) + 1
+        state["critic_refinement_hint"] = None  # Clear after consuming
+
+    # Augment the retrieval query with the critic's hint on retries
+    retrieval_query = f"{query} {refinement_hint}" if refinement_hint else query
+
     # Build a contextualized query from conversation history
     # so follow-up messages like "no pain, 5 lesions" include prior context
     if chat_history:
@@ -130,10 +141,9 @@ def rag_node(state):
     else:
         contextualized_query = query
 
-    # Use the current message for retrieval (most relevant to vector search)
-    # but also try the contextualized version if history exists
+    # Use the retrieval query for vector search (augmented with critic hint on retries)
     try:
-        docs = retrieve(query)
+        docs = retrieve(retrieval_query)
     except Exception as e:
         state["rag_output"] = {"error": f"Retrieval failed: {str(e)}"}
         return state

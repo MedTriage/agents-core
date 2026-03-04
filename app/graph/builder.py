@@ -1,6 +1,7 @@
 # Graph builder
 from langgraph.graph import StateGraph
 from app.graph.state import AgentState
+from app.config import MAX_RAG_RETRIES
 
 from app.graph.nodes.intent_node import intent_node
 from app.graph.nodes.rag_node import rag_node
@@ -23,6 +24,17 @@ def route_after_intent(state: AgentState):
         return "companion_node"
     else:
         return "rag_node"
+
+
+def route_after_critic(state: AgentState):
+    """Route critic output: retry RAG if 'revise' and retries remain, else proceed to guardian."""
+    decision = state.get("critic_decision", "")
+    retry_count = state.get("rag_retry_count", 0) or 0
+
+    if decision == "revise" and retry_count < MAX_RAG_RETRIES:
+        return "rag_node"
+
+    return "guardian_node"
 
 
 def build_graph():
@@ -48,7 +60,15 @@ def build_graph():
     )
 
     builder.add_edge("rag_node", "critic_node")
-    builder.add_edge("critic_node", "guardian_node")
+
+    builder.add_conditional_edges(
+        "critic_node",
+        route_after_critic,
+        {
+            "rag_node": "rag_node",
+            "guardian_node": "guardian_node",
+        },
+    )
 
     builder.set_finish_point("guardian_node")
     builder.set_finish_point("image_node")

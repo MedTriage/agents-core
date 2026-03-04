@@ -28,3 +28,7 @@ class AgentState(TypedDict):
     # Guardian analysis
     guardian_output: Optional[dict]
     triage_level: Optional[str]
+
+    # Re-retrieval loop (critic → RAG)
+    rag_retry_count: Optional[int]
+    critic_refinement_hint: Optional[str]

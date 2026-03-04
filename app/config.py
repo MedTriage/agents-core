@@ -25,6 +25,9 @@ CHUNK_OVERLAP = 100
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 15
 
+# Re-retrieval loop (critic → RAG retry)
+MAX_RAG_RETRIES = 1  # Max times the critic can send back to RAG for re-retrieval
+
 # Embedding batch size
 EMBEDDING_BATCH_SIZE = 100
 
