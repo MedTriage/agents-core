@@ -44,8 +44,9 @@ Rewrite the clinical assessment into a clear, authoritative, patient-friendly re
   system already routes Level 2/3 cases to physicians for verification. Only
   include a provider referral if the clinical situation genuinely warrants an
   in-person evaluation beyond what the system can assess.
-- If there are safety concerns from Part 1, flag them but still provide the
-  assessment — just note which parts need physician review.
+- If the RAG output contains a diagnosis, drug, or treatment NOT found in the retrieved context (a hallucination), 
+  you MUST set decision to 'revise' or 'escalate' and confidence to 0.0. Do NOT synthesize a hallucinated diagnosis, 
+  even if you know it to be medically correct from your general training.
 - Keep it concise: 3-5 sentences for straightforward cases, up to a short
   paragraph for complex ones.
 - CLARIFICATION RESPONSES: If the RAG output indicates clarification is needed
@@ -95,7 +96,30 @@ Do NOT drop confidence to 0.0 merely because the RAG made reasonable clinical
 inferences from stated symptoms, or because the user's phrasing was imprecise
 (e.g., saying "99 degrees" instead of "low-grade fever"). A "revise" decision
 with minor issues should typically have confidence 0.5-0.8, not 0.0.
+
+=== SAFETY RISK CALIBRATION (Strict Clinical Definitions) ===
+You must strictly classify the "safety_risk" of the patient's condition based on the following 
+clinical timelines and physiological threats:
+
+- high: IMMEDIATE THREAT TO LIFE, LIMB, OR EYESIGHT. 
+  * Criteria: Any compromise to the "ABCs" (Airway, Breathing, Circulation), suspected anatomical blockage 
+  (e.g., airway pseudomembranes, severe swelling), stroke symptoms, severe chest pain, or rapid physiological 
+  deterioration.
+  * Action: Must trigger emergency protocols.
+
+- moderate: URGENT / REQUIRES TIMELY MEDICAL INTERVENTION.
+  * Criteria: Condition is not immediately life-threatening but requires prescription medications 
+  (e.g., antibiotics for suspected bacterial infections like Strep), 
+  diagnostic imaging, lab workups, or professional clinical monitoring to prevent worsening.
+  * Action: Needs physician review before proceeding; appropriate for outpatient or urgent care.
+
+- low: SELF-LIMITING / ROUTINE.
+  * Criteria: Minor ailments that can be safely managed with over-the-counter remedies, rest, or 
+  general wellness advice (e.g., common viral cold, minor abrasions, routine dietary questions). 
+  * Action: Safe for standard digital triage guidance.
+
 """
+
 
 @retry_on_exception
 def call_model(prompt: str):
@@ -119,14 +143,17 @@ def critic_node(state):
             "issues": ["RAG output missing or errored"],
             "safety_risk": "high",
             "decision": "escalate",
-            "confidence_adjusted": 0.0
+            "confidence_adjusted": 0.0,
         }
         return state
 
     # If RAG requested clarification, pass it through directly —
     # do NOT override with a clinical response the RAG intentionally withheld
     probable_diagnosis = str(rag_output.get("probable_diagnosis", "")).lower()
-    if "clarification needed" in probable_diagnosis or "insufficient detail" in probable_diagnosis:
+    if (
+        "clarification needed" in probable_diagnosis
+        or "insufficient detail" in probable_diagnosis
+    ):
         # Use the RAG's follow-up questions as the response
         follow_up_questions = rag_output.get("recommended_actions", [])
         differentials = rag_output.get("differentials", [])
@@ -153,7 +180,7 @@ def critic_node(state):
             "issues": [],
             "safety_risk": "low",
             "decision": "approve",
-            "confidence_adjusted": 0.0
+            "confidence_adjusted": 0.0,
         }
         return state
 
@@ -180,7 +207,14 @@ def critic_node(state):
         parsed = json.loads(raw[start:end])
 
         # Validate required keys
-        required_keys = ["response", "is_supported", "issues", "safety_risk", "decision", "confidence_adjusted"]
+        required_keys = [
+            "response",
+            "is_supported",
+            "issues",
+            "safety_risk",
+            "decision",
+            "confidence_adjusted",
+        ]
         for key in required_keys:
             if key not in parsed:
                 raise ValueError(f"Missing required key in critic response: {key}")
@@ -217,7 +251,7 @@ def critic_node(state):
             "is_supported": False,
             "safety_risk": "high",
             "decision": "escalate",
-            "confidence_adjusted": 0.0
+            "confidence_adjusted": 0.0,
         }
 
     return state
