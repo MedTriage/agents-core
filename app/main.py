@@ -1,4 +1,4 @@
-# Main application entry point 
+# Main application entry point
 from fastapi import FastAPI
 from pydantic import BaseModel
 from app.graph.builder import build_graph
@@ -8,11 +8,12 @@ app = FastAPI()
 graph = build_graph()
 
 class InputRequest(BaseModel):
+    conversation_id: str
     text: str
     chat_history: list[dict] = []
 
 # Home route
-@app.get("/")  
+@app.get("/")
 def read_root():
     return {"message": "Welcome to the API!"}
 
@@ -20,6 +21,7 @@ def read_root():
 @app.post("/process")
 def process_input(request: InputRequest):
     result = graph.invoke({
+        "conversation_id": request.conversation_id,
         "user_input": request.text,
         "chat_history": request.chat_history
     })
