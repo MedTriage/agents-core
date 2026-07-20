@@ -1,4 +1,5 @@
 import json
+import re
 from app.services.cerebras_client import generate_content
 from app.services.retry import retry_on_exception
 from app.graph.nodes.orchestrator_node import BRANCHES, BRANCH_STATE_KEY
@@ -76,6 +77,17 @@ def call_model(prompt: str):
     return generate_content(prompt)
 
 
+def _scan(text: str, keywords) -> bool:
+    """Keyword scan with a leading word boundary.
+
+    The boundary avoids prose false positives — 'greatest' must not match 'test',
+    'programme' must not match 'mg' — while still catching inflections like 'tests',
+    'prescribed', or 'antibiotics'. Used to floor a case at level_2 when the text
+    contains a prescription or diagnostic order.
+    """
+    return any(re.search(r"\b" + re.escape(kw), text) for kw in keywords)
+
+
 def _recommended_actions_text(state) -> str:
     """Every recommendation any retrieval branch made, lowercased for keyword floors.
 
@@ -103,6 +115,7 @@ def guardian_node(state):
 
     is_emergency = bool(state.get("is_emergency", False))
     is_clarification = bool(state.get("is_clarification", False))
+    evidence_grounded = bool(orchestrator_output.get("evidence_grounded", True))
 
     # Clarification requests are safe — no diagnosis was made.
     if is_clarification and not is_emergency and decision != "escalate" and safety_risk != "high":
@@ -120,11 +133,15 @@ def guardian_node(state):
     # Note: low confidence alone only triggers level_3 if the orchestrator also
     # escalated or flagged high safety risk. A "revise" with low confidence is
     # routed to level_2 (physician review) rather than locking the system.
+    # The low-confidence lock is for a genuinely shaky *sourced* assessment. An
+    # ungrounded general-knowledge answer (evidence_grounded=false) is intentionally
+    # modest-confidence and must not be locked to level_3 merely for lacking sources —
+    # its safety comes from emergency detection and the prescription/diagnostic floor.
     hard_level_3 = (
         is_emergency
         or decision == "escalate"
         or safety_risk == "high"
-        or (confidence < 0.3 and decision != "revise")
+        or (confidence < 0.3 and decision != "revise" and evidence_grounded)
     )
 
     if hard_level_3:
@@ -152,10 +169,14 @@ def guardian_node(state):
             },
         }
 
-    # Diagnostic tests, labs, or prescriptions → minimum level_2
-    actions_text = _recommended_actions_text(state)
-    has_diagnostic = any(kw in actions_text for kw in DIAGNOSTIC_KEYWORDS)
-    has_prescription = any(kw in actions_text for kw in PRESCRIPTION_KEYWORDS)
+    # Diagnostic tests, labs, or prescriptions → minimum level_2. Scan BOTH the
+    # branches' recommendations AND the patient-facing response: a prescription or test
+    # order can appear in the synthesized response without being in any branch's
+    # recommended_actions (e.g. when retrieval was empty and the answer came from
+    # general knowledge). Scanning only branch actions left that path unguarded.
+    scan_text = _recommended_actions_text(state) + " " + str(orchestrator_response).lower()
+    has_diagnostic = _scan(scan_text, DIAGNOSTIC_KEYWORDS)
+    has_prescription = _scan(scan_text, PRESCRIPTION_KEYWORDS)
     floor_level_2 = has_diagnostic or has_prescription
 
     # --- LLM call for nuanced level_1 vs level_2 decisions ---
