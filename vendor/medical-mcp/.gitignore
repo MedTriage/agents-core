@@ -1,0 +1,6 @@
+# Installed dependencies (~123MB) — run `npm install` to recreate.
+node_modules/
+
+# Compiled output — run `npm run build` to recreate. Useless without node_modules
+# anyway, since the server imports the MCP SDK, superagent and puppeteer at runtime.
+build/

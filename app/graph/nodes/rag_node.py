@@ -1,6 +1,7 @@
 import json
+from app.graph.nodes.scribe_node import format_record
 from app.rag.retriever import retrieve
-from app.services.openai_client import generate_content
+from app.services.cerebras_client import generate_content
 from app.services.retry import retry_on_exception
 
 RAG_PROMPT = """
@@ -54,7 +55,16 @@ You are given retrieved medical context below and a user query. Your job is to:
   - Set confidence to 0.0
 - NEVER attribute symptoms, descriptions, or history to the user that they did
   not explicitly state. "Based on your description of..." is only valid if the
-  user actually described it.
+  user actually described it. Anything in the PATIENT RECORD section counts as
+  explicitly stated — it was recorded from the patient's own earlier messages.
+- RECENCY: the PATIENT RECORD separates symptoms REPORTED THIS TURN from STANDING
+  SYMPTOM HISTORY. The chief complaint is what the patient reported this turn.
+  Standing history is background: it may have resolved, and the patient did not
+  raise it now. Do NOT anchor a diagnosis on a standing-history symptom the
+  patient did not re-report — a rash recorded three turns ago is not evidence
+  that the patient has a rash today. Use it to inform the differential, not to
+  drive it. If a standing symptom would materially change the assessment, ask
+  whether it is still present rather than assuming it is.
 
 === GROUNDING RULES ===
 - Ground every claim in the retrieved context. Do NOT fabricate clinical
@@ -114,15 +124,12 @@ def rag_node(state):
     query = state["user_input"]
     chat_history = state.get("chat_history", []) or []
 
-    # Re-retrieval loop: if the critic sent us back, use the refinement hint
-    refinement_hint = state.get("critic_refinement_hint")
-    is_retry = state.get("rag_output") is not None
+    # Re-retrieval loop: if the orchestrator sent this branch back, it left a hint.
+    # Retry accounting lives in the orchestrator — this node runs in parallel with the
+    # other branches and must not write shared state.
+    refinement_hint = (state.get("branch_refinement_hints") or {}).get("rag")
 
-    if is_retry:
-        state["rag_retry_count"] = (state.get("rag_retry_count", 0) or 0) + 1
-        state["critic_refinement_hint"] = None  # Clear after consuming
-
-    # Augment the retrieval query with the critic's hint on retries
+    # Augment the retrieval query with the orchestrator's hint on retries
     retrieval_query = f"{query} {refinement_hint}" if refinement_hint else query
 
     # Build a contextualized query from conversation history
@@ -141,35 +148,35 @@ def rag_node(state):
     else:
         contextualized_query = query
 
-    # Use the retrieval query for vector search (augmented with critic hint on retries)
+    # Use the retrieval query for vector search (augmented with the hint on retries)
     try:
         docs = retrieve(retrieval_query)
     except Exception as e:
-        state["rag_output"] = {"error": f"Retrieval failed: {str(e)}"}
-        return state
+        return {"rag_output": {"error": f"Retrieval failed: {str(e)}"}}
 
     # If no relevant documents were retrieved, return a safe default response
     if not docs:
-        state["rag_output"] = NO_CONTEXT_RESPONSE
-        return state
+        output = dict(NO_CONTEXT_RESPONSE)
+        output["retrieval_signal"] = {"scores": [], "n_docs": 0}
+        return {"rag_output": output}
 
     # Build context from retrieved documents
     context = "\n\n".join(
         [f"[Source: {d['source']} | Score: {d['score']:.2f}]\n{d['text']}" for d in docs]
     )
 
-    # Persist context for the critic node to verify against
-    state["retrieved_context"] = context
-
     # Build prompt — use contextualized query so the LLM sees conversation history
     prompt = (
         RAG_PROMPT
         + context
+        + "\n\n=== PATIENT RECORD (established facts — treat as stated by the patient) ===\n"
+        + format_record(state.get("scribe_output") or {})
         + "\n\n=== USER QUERY (classify and respond based ONLY on retrieved context above) ===\n"
         + contextualized_query
     )
 
-    # LLM call
+    # LLM call. `retrieved_context` is written here so the orchestrator can verify the
+    # RAG branch's claims against the same sources it saw.
     try:
         raw = call_model(prompt)
 
@@ -192,13 +199,21 @@ def rag_node(state):
 
         parsed["sources_retrieved"] = len(docs)
 
-        state["rag_output"] = parsed
+        # Raw retrieval signal, for belief-mass construction downstream. The similarity
+        # scores are the only evidence-strength measure in this branch the LLM did not
+        # author — `confidence` above is a self-report and must not drive belief.
+        parsed["retrieval_signal"] = {
+            "scores": [d["score"] for d in docs],
+            "n_docs": len(docs),
+        }
+
+        return {"rag_output": parsed, "retrieved_context": context}
 
     except json.JSONDecodeError as e:
-        state["rag_output"] = {"error": f"Failed to parse LLM response as JSON: {str(e)}"}
+        rag_output = {"error": f"Failed to parse LLM response as JSON: {str(e)}"}
     except ValueError as e:
-        state["rag_output"] = {"error": f"Invalid LLM response structure: {str(e)}"}
+        rag_output = {"error": f"Invalid LLM response structure: {str(e)}"}
     except Exception as e:
-        state["rag_output"] = {"error": f"LLM generation failed: {str(e)}"}
+        rag_output = {"error": f"LLM generation failed: {str(e)}"}
 
-    return state
+    return {"rag_output": rag_output, "retrieved_context": context}
