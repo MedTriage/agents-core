@@ -13,6 +13,7 @@ resulting subgraph into the shared branch-output shape (LLM).
 import json
 
 from app.config import SNOMED_MAX_ENRICHED_SUBTYPES
+from app.graph.nodes.scribe_node import format_record
 from app.services import snomed_store
 from app.services.snomed_store import SnomedUnavailable
 from app.services.cerebras_client import generate_content
@@ -34,6 +35,10 @@ they can be matched against the SNOMED CT terminology.
 - Extract the terms the patient ACTUALLY reported, plus any established conditions from
   the patient record. Do NOT invent symptoms, and do NOT infer a diagnosis — naming the
   disease the patient might have is not your job, the graph decides that.
+- Prioritise what the record lists as REPORTED THIS TURN. Symptoms under STANDING
+  SYMPTOM HISTORY were raised in earlier turns and may have resolved — include one only
+  if the budget allows after the current complaint is covered, since every term you
+  return competes for a fixed number of graph lookups.
 - Use clinical terminology where the patient used lay terms ("throwing up" → "vomiting"),
   because SNOMED is indexed on clinical terms.
 - Keep each term short — two or three words. SNOMED descriptions are concept names, not
@@ -117,10 +122,7 @@ def call_model(prompt: str):
 
 
 def _build_query_context(state) -> str:
-    parts = [
-        "=== PATIENT RECORD ===\n"
-        + json.dumps(state.get("scribe_output") or {}, indent=2)
-    ]
+    parts = ["=== PATIENT RECORD ===\n" + format_record(state.get("scribe_output") or {})]
 
     chat_history = state.get("chat_history") or []
     if chat_history:
@@ -165,11 +167,23 @@ def _attribute_lines(concept_id: int) -> list[str]:
     ]
 
 
-def _traverse(terms: list[str]) -> list[dict]:
-    """Map terms onto concepts and pull the ontology around each. No LLM — pure graph."""
+def _traverse(terms: list[str]) -> tuple[list[dict], dict]:
+    """Map terms onto concepts and pull the ontology around each. No LLM — pure graph.
+
+    Returns the subgraph for the prompt and, separately, the raw retrieval signal for
+    belief-mass construction: bm25 match quality per concept and how many subtypes the
+    walk turned up. The signal is kept OUT of the subgraph deliberately — it is evidence
+    about the retrieval, not evidence for the patient's question, and putting bm25 ranks
+    in front of the synthesizing model would only add noise.
+
+    Subtype count is the load-bearing number: a concept with many subtypes means the
+    ontology has identified the candidate set but cannot discriminate within it, which
+    is a genuinely different epistemic state from having no match at all.
+    """
     concepts = snomed_store.find_concepts(terms)
 
     subgraph = []
+    signal_concepts = []
     for concept in concepts:
         descendants = snomed_store.get_descendants(concept["id"])
 
@@ -187,6 +201,14 @@ def _traverse(terms: list[str]) -> list[dict]:
                     entry["attributes"] = attrs
             subtypes.append(entry)
 
+        signal_concepts.append(
+            {
+                "id": concept["id"],
+                "rank": concept.get("rank"),
+                "n_subtypes": len(subtypes),
+            }
+        )
+
         subgraph.append(
             {
                 "concept": concept["fsn"] or concept["matched_term"],
@@ -198,7 +220,81 @@ def _traverse(terms: list[str]) -> list[dict]:
             }
         )
 
-    return subgraph
+    return subgraph, {"concepts": signal_concepts, "n_concepts": len(subgraph)}
+
+
+def _graph(subgraph: list[dict]) -> dict:
+    """Flatten the traversal into nodes and edges.
+
+    The subgraph is built for the synthesis prompt and then thrown away, but it is the
+    only place in the system that holds the ontology's actual shape — which finding sits
+    above which disorder. Emitting it lets the interface show the differential being
+    narrowed rather than asserting that it was.
+
+    Depth 0 is what the patient's words matched; depth 1 is what falls under it, which
+    is to say the candidates worth ruling out.
+    """
+    nodes: dict[int, dict] = {}
+    edges: list[dict] = []
+
+    for entry in subgraph:
+        nodes.setdefault(
+            entry["id"], {"id": entry["id"], "label": entry["concept"], "depth": 0}
+        )
+
+        for subtype in entry["subtypes"]:
+            nodes.setdefault(
+                subtype["id"],
+                {"id": subtype["id"], "label": subtype["concept"], "depth": 1},
+            )
+            edges.append({"from": entry["id"], "to": subtype["id"]})
+
+    return {"nodes": list(nodes.values()), "edges": edges, "links": _links(nodes)}
+
+
+# Attributes that make two disorders genuinely alike. "Clinical course" and "Severity"
+# are excluded on purpose: that two conditions are both chronic says nothing clinically
+# useful, and including them links almost everything to everything.
+_LINKING_ATTRIBUTES = {
+    "Finding site",
+    "Causative agent",
+    "Pathological process",
+    "Associated morphology",
+    "Due to",
+}
+
+
+def _links(nodes: dict[int, dict]) -> list[dict]:
+    """Edges between candidates that share a defining attribute.
+
+    SNOMED's IS_A hierarchy connects a finding to the disorders beneath it, but says
+    nothing about how those disorders relate to EACH OTHER — so drawing a mesh between
+    them from the hierarchy alone would mean inventing clinical relationships.
+
+    Shared defining attributes are the honest source. Two disorders sited in the same
+    structure, or caused by the same agent, are related by SNOMED's own assertion. Each
+    link carries the attribute that justifies it, so nothing on screen is unattributable.
+    """
+    attributes: dict[int, set[tuple[str, str]]] = {}
+    for node_id in nodes:
+        attributes[node_id] = {
+            (a["relationship"], a["value_fsn"])
+            for a in snomed_store.get_attributes(node_id)
+            if a["relationship"] in _LINKING_ATTRIBUTES
+        }
+
+    ids = list(nodes)
+    links = []
+    for i, a in enumerate(ids):
+        for b in ids[i + 1 :]:
+            shared = attributes[a] & attributes[b]
+            if shared:
+                relationship, value = sorted(shared)[0]
+                links.append(
+                    {"from": a, "to": b, "via": f"{relationship}: {value}"}
+                )
+
+    return links
 
 
 def _synthesize(subgraph: list[dict], query_context: str) -> dict:
@@ -241,9 +337,11 @@ def kgrag_node(state):
         # No clinical terms in the message — nothing for an ontology to say. Not an
         # error, just an absence of evidence for the orchestrator to weigh.
         if not terms:
-            return {"kgrag_output": dict(NO_MATCH_OUTPUT)}
+            output = dict(NO_MATCH_OUTPUT)
+            output["retrieval_signal"] = {"concepts": [], "n_concepts": 0}
+            return {"kgrag_output": output}
 
-        subgraph = _traverse(terms)
+        subgraph, signal = _traverse(terms)
 
         # Terms were extracted but nothing matched SNOMED. Also an absence of evidence,
         # not a failure — and worth surfacing, since it usually means the phrasing was
@@ -251,12 +349,15 @@ def kgrag_node(state):
         if not subgraph:
             output = dict(NO_MATCH_OUTPUT)
             output["unmatched_terms"] = terms
+            output["retrieval_signal"] = signal
             return {"kgrag_output": output}
 
         output = _synthesize(subgraph, query_context)
         output["matched_concepts"] = [
             {"id": c["id"], "fsn": c["concept"]} for c in subgraph
         ]
+        output["graph"] = _graph(subgraph)
+        output["retrieval_signal"] = signal
         return {"kgrag_output": output}
 
     except SnomedUnavailable as e:

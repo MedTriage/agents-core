@@ -16,7 +16,13 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from app.config import MCP_SERVER_DIR, MCP_TIMEOUT
 
 # Operational tooling, not clinical evidence — never offer it as a retrieval option.
-EXCLUDED_TOOLS = {"get-cache-stats"}
+#
+# search-google-scholar is excluded for a different reason: it scrapes via puppeteer,
+# launching a full browser, and is by a wide margin the slowest path in the server. It
+# is also the source DST_MCP_TIER already trusts least (0.5, against 0.9 for FDA and
+# 0.85 for WHO), so dropping it removes the worst latency tail at close to zero
+# evidential cost. The other puppeteer paths sit inside tools worth keeping.
+EXCLUDED_TOOLS = {"get-cache-stats", "search-google-scholar"}
 
 
 def _server_params() -> StdioServerParameters:

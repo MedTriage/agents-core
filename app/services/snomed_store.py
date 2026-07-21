@@ -11,11 +11,13 @@ depth-bounded hierarchy walks (recursive CTEs). No server, no JVM, no size cap, 
 full ~370k-concept release fits comfortably.
 """
 import os
+import re
 import sqlite3
 
 from app.config import (
     SNOMED_DB_PATH,
     SNOMED_MAX_CONCEPTS,
+    SNOMED_MAX_CONCEPTS_PER_TERM,
     SNOMED_MAX_DEPTH,
     SNOMED_MAX_RELATIVES,
 )
@@ -41,6 +43,20 @@ ATTRIBUTE_NAMES = {
     418775008: "Finding method",
     260686004: "Method",
 }
+
+
+# Every FSN ends in a semantic tag: "Diphtheria (disorder)". Only these three describe
+# something the patient can HAVE. The one that matters is the tag we exclude:
+# "(situation)" wraps context around a finding, including its negation — "No sore
+# throat (situation)" is a genuine concept and a genuine lexical match for the words a
+# patient used, and linking to it inverts what they said.
+ALLOWED_SEMANTIC_TAGS = {"finding", "disorder", "event"}
+
+_SEMANTIC_TAG = re.compile(r"\(([^)]*)\)\s*$")
+
+# Rows to pull per term before filtering. The tag filter rejects a good fraction of
+# lexical matches, so the SQL has to over-fetch to still fill the per-term budget.
+_TAG_FILTER_OVERSAMPLE = 5
 
 
 class SnomedUnavailable(RuntimeError):
@@ -72,16 +88,33 @@ def _fts_query(term: str) -> str:
     return " AND ".join(f'"{w}"' for w in words)
 
 
-def find_concepts(terms: list[str], limit: int = SNOMED_MAX_CONCEPTS) -> list[dict]:
+def _semantic_tag(fsn: str) -> str:
+    match = _SEMANTIC_TAG.search(fsn or "")
+    return match.group(1).strip().lower() if match else ""
+
+
+def find_concepts(
+    terms: list[str],
+    limit: int = SNOMED_MAX_CONCEPTS,
+    per_term: int = SNOMED_MAX_CONCEPTS_PER_TERM,
+) -> list[dict]:
     """Map free-text clinical terms onto SNOMED concepts (the entity-linking step).
 
     SNOMED's own Description records are the lexicon — no external NER model. Ranked by
     FTS5 relevance, with shorter descriptions preferred on ties: "Sore throat" should
     win over "Sore throat co-occurrent with acute pharyngitis" for the bare phrase.
+
+    Each term gets its own small budget and the results are then interleaved, so every
+    term is represented before any term takes a second slot. This matters more than it
+    looks: bm25 scores a one-word query like "fever" highly against every short
+    description containing it, so without a per-term cap that single term returns Q
+    fever, Piry virus disease and malt-workers' lung, exhausts the budget, and the
+    patient's actual complaint never gets linked.
     """
     conn = _connect()
     try:
-        seen: dict[int, dict] = {}
+        per_term_hits: list[list[dict]] = []
+        seen: set[int] = set()
 
         for term in terms:
             query = _fts_query(term)
@@ -103,20 +136,42 @@ def find_concepts(terms: list[str], limit: int = SNOMED_MAX_CONCEPTS) -> list[di
                 ORDER BY rank, length(d.term)
                 LIMIT ?
                 """,
-                (query, limit),
+                (query, per_term * _TAG_FILTER_OVERSAMPLE),
             ).fetchall()
 
+            hits: list[dict] = []
             for row in rows:
                 # First match for a concept wins — rows are already relevance-ordered.
-                if row["id"] not in seen:
-                    seen[row["id"]] = {
+                if row["id"] in seen:
+                    continue
+                if _semantic_tag(row["fsn"]) not in ALLOWED_SEMANTIC_TAGS:
+                    continue
+
+                seen.add(row["id"])
+                hits.append(
+                    {
                         "id": row["id"],
                         "fsn": row["fsn"],
                         "matched_term": row["matched_term"],
                         "matched_query": term,
+                        # FTS5 bm25: more negative is a better match. Surfaced raw —
+                        # callers that need a match-quality measure normalise it.
+                        "rank": row["rank"],
                     }
+                )
+                if len(hits) >= per_term:
+                    break
 
-        return list(seen.values())[:limit]
+            per_term_hits.append(hits)
+
+        # Round-robin: every term's best match, then every term's second, and so on.
+        ordered = [
+            hits[i]
+            for i in range(per_term)
+            for hits in per_term_hits
+            if i < len(hits)
+        ]
+        return ordered[:limit]
     finally:
         conn.close()
 

@@ -1,4 +1,5 @@
 import json
+from app.graph.nodes.scribe_node import format_record
 from app.rag.retriever import retrieve
 from app.services.cerebras_client import generate_content
 from app.services.retry import retry_on_exception
@@ -56,6 +57,14 @@ You are given retrieved medical context below and a user query. Your job is to:
   not explicitly state. "Based on your description of..." is only valid if the
   user actually described it. Anything in the PATIENT RECORD section counts as
   explicitly stated — it was recorded from the patient's own earlier messages.
+- RECENCY: the PATIENT RECORD separates symptoms REPORTED THIS TURN from STANDING
+  SYMPTOM HISTORY. The chief complaint is what the patient reported this turn.
+  Standing history is background: it may have resolved, and the patient did not
+  raise it now. Do NOT anchor a diagnosis on a standing-history symptom the
+  patient did not re-report — a rash recorded three turns ago is not evidence
+  that the patient has a rash today. Use it to inform the differential, not to
+  drive it. If a standing symptom would materially change the assessment, ask
+  whether it is still present rather than assuming it is.
 
 === GROUNDING RULES ===
 - Ground every claim in the retrieved context. Do NOT fabricate clinical
@@ -147,7 +156,9 @@ def rag_node(state):
 
     # If no relevant documents were retrieved, return a safe default response
     if not docs:
-        return {"rag_output": dict(NO_CONTEXT_RESPONSE)}
+        output = dict(NO_CONTEXT_RESPONSE)
+        output["retrieval_signal"] = {"scores": [], "n_docs": 0}
+        return {"rag_output": output}
 
     # Build context from retrieved documents
     context = "\n\n".join(
@@ -159,7 +170,7 @@ def rag_node(state):
         RAG_PROMPT
         + context
         + "\n\n=== PATIENT RECORD (established facts — treat as stated by the patient) ===\n"
-        + json.dumps(state.get("scribe_output") or {}, indent=2)
+        + format_record(state.get("scribe_output") or {})
         + "\n\n=== USER QUERY (classify and respond based ONLY on retrieved context above) ===\n"
         + contextualized_query
     )
@@ -187,6 +198,14 @@ def rag_node(state):
             parsed["confidence"] = max(0.0, min(1.0, confidence))
 
         parsed["sources_retrieved"] = len(docs)
+
+        # Raw retrieval signal, for belief-mass construction downstream. The similarity
+        # scores are the only evidence-strength measure in this branch the LLM did not
+        # author — `confidence` above is a self-report and must not drive belief.
+        parsed["retrieval_signal"] = {
+            "scores": [d["score"] for d in docs],
+            "n_docs": len(docs),
+        }
 
         return {"rag_output": parsed, "retrieved_context": context}
 

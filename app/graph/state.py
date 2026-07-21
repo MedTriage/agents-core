@@ -24,6 +24,11 @@ class AgentState(TypedDict):
     kgrag_output: Optional[dict]
     mcp_output: Optional[dict]
 
+    # Dempster-Shafer fusion of the branches: belief intervals, conflict K, ignorance
+    # m(Θ), and the control action they imply. Computed independently of the
+    # orchestrator so the two fusions can be compared; advisory, not yet routing.
+    dst_output: Optional[dict]
+
     # Orchestrator: synthesis, conflict resolution, safety audit
     orchestrator_output: Optional[dict]
     orchestrator_decision: Optional[str]  # approve | revise | escalate

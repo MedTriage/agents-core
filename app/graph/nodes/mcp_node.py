@@ -225,11 +225,21 @@ def mcp_node(state):
         # evidence, and the orchestrator should weigh it as such rather than discard
         # the branch.
         if not evidence.strip():
-            return {"mcp_output": dict(NO_EVIDENCE_OUTPUT)}
+            output = dict(NO_EVIDENCE_OUTPUT)
+            output["retrieval_signal"] = {"tool": choice["tool"], "evidence_chars": 0}
+            return {"mcp_output": output}
 
         output = _synthesize(evidence, query_context, choice["tool"])
         output["tool_used"] = choice["tool"]
         output["tool_arguments"] = choice["arguments"]
+
+        # Raw retrieval signal for belief-mass construction. Which tool answered carries
+        # the source's authority (an FDA label outranks a Scholar scrape) and the volume
+        # of returned text separates a substantive hit from a technically-successful one.
+        output["retrieval_signal"] = {
+            "tool": choice["tool"],
+            "evidence_chars": len(evidence),
+        }
 
         return {"mcp_output": output}
 

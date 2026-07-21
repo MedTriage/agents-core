@@ -1,5 +1,7 @@
 import json
 import re
+from app.config import DST_CONFLICT_ESCALATE, DST_ENFORCE
+from app.services import dst, trace
 from app.services.cerebras_client import generate_content
 from app.services.retry import retry_on_exception
 from app.graph.nodes.orchestrator_node import BRANCHES, BRANCH_STATE_KEY
@@ -104,6 +106,14 @@ def _recommended_actions_text(state) -> str:
 
 
 def guardian_node(state):
+    """Assign the triage level, then check that assignment against the fused evidence."""
+    result = _classify(state)
+    result = _apply_dst_audit(state, result)
+    trace.record(state, result)
+    return result
+
+
+def _classify(state):
     user_input = state.get("user_input", "")
     orchestrator_output = state.get("orchestrator_output") or {}
     orchestrator_response = state.get("orchestrator_response", "")
@@ -245,6 +255,100 @@ def guardian_node(state):
                 "error": str(e),
             },
         }
+
+
+_LEVEL_ORDER = {"level_1": 1, "level_2": 2, "level_3": 3}
+
+
+def _apply_dst_audit(state, result):
+    """Check the orchestrator's answer against the arithmetic fusion of the same evidence.
+
+    The orchestrator writes prose; this asks whether the evidence actually permits it.
+    Three checks, each of which can only make the outcome more cautious:
+
+    1. Conflict — the branches support mutually exclusive conclusions. A physician should
+       see it, and re-retrieval would not settle a contested question anyway.
+    2. Overconfidence — the claimed confidence exceeds the plausibility of the very
+       diagnosis being claimed. You cannot be more certain than the evidence allows.
+    3. Unsupported claim — the named diagnosis carries zero belief, meaning no branch's
+       retrieval supports it. This is strictly stronger than the `evidence_grounded`
+       flag, which only fires when EVERY branch came back empty: it also catches the
+       case where retrieval succeeded and the model answered about something else.
+
+    Gated by DST_ENFORCE. While that is false the audit is recorded and nothing changes,
+    because the frame is built by string-matching diagnosis labels and an unmeasured
+    mismatch rate would fire these clamps for the wrong reason.
+    """
+    dst_output = state.get("dst_output") or {}
+    if not dst_output or "error" in dst_output:
+        return result
+
+    orchestrator_output = state.get("orchestrator_output") or {}
+    hypotheses = dst_output.get("hypotheses") or []
+    conflict = float(dst_output.get("conflict") or 0.0)
+
+    diagnosis = dst.normalize_label(orchestrator_output.get("probable_diagnosis"))
+    match = next((h for h in hypotheses if h["hypothesis"] == diagnosis), None)
+
+    confidence = float(orchestrator_output.get("confidence_adjusted") or 0.0)
+    plausibility = match["plausibility"] if match else None
+
+    findings = []
+    if conflict >= DST_CONFLICT_ESCALATE:
+        findings.append(f"sources conflict (K={conflict:.2f})")
+
+    overconfident = plausibility is not None and confidence > plausibility + 1e-9
+    if overconfident:
+        findings.append(
+            f"claimed confidence {confidence:.2f} exceeds plausibility {plausibility:.2f}"
+        )
+
+    # Only meaningful when the fusion has a frame to judge against — with no hypotheses
+    # at all there is nothing to be absent from.
+    unsupported = bool(diagnosis and dst_output.get("frame")) and (
+        match is None or match["belief"] <= 0.0
+    )
+    if unsupported:
+        findings.append(f"no branch's retrieval supports '{diagnosis}'")
+
+    current = result.get("triage_level", "level_2")
+    # Floor at level_2, not level_3: these are grounds for a human to look, not for
+    # locking the system. Over-escalation has its own cost.
+    proposed = "level_2" if findings and _LEVEL_ORDER.get(current, 2) < 2 else current
+
+    result["guardian_output"]["dst_audit"] = {
+        "enforced": DST_ENFORCE,
+        "conflict": conflict,
+        "ignorance": dst_output.get("ignorance"),
+        "diagnosis_checked": diagnosis or None,
+        "belief": match["belief"] if match else None,
+        "plausibility": plausibility,
+        "unruled_out": dst_output.get("unruled_out"),
+        "findings": findings,
+        "level_without_dst": current,
+        "level_with_dst": proposed,
+    }
+
+    if not DST_ENFORCE or not findings:
+        return result
+
+    if proposed != current:
+        result["triage_level"] = proposed
+        result["guardian_output"]["triage_level"] = proposed
+        result["guardian_output"]["requires_doctor"] = True
+        result["guardian_output"]["reasoning"] = (
+            result["guardian_output"].get("reasoning", "")
+            + f" (elevated by evidence fusion: {', '.join(findings)})"
+        )
+
+    if overconfident:
+        # The displayed confidence is the orchestrator's, so capping it has to write
+        # back there. Safe: the guardian runs after the orchestrator, not beside it.
+        capped = dict(orchestrator_output)
+        capped["confidence_adjusted"] = plausibility
+        result["orchestrator_output"] = capped
+
+    return result
 
 
 def _build_hard_rule_reasoning(is_emergency, decision, safety_risk, confidence):

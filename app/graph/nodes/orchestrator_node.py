@@ -78,7 +78,14 @@ Synthesize the surviving evidence into one clear, authoritative, patient-friendl
   test names, and protocols where the evidence supports them.
 - Structure it naturally: what the condition likely is, then what to do about it, then any
   important warnings.
-- Reference sources inline where it adds authority ("Per WHO clinical guidelines...").
+- Reference sources inline ONLY as a patient would recognise them — the issuing body or
+  publication ("Per WHO clinical guidelines...", "FDA labelling advises..."). The patient
+  is the reader of this field and knows nothing about how this system is built.
+  NEVER write into "response": the names or tags of the internal agents (RAG, KGRAG, MCP,
+  orchestrator, guardian, scribe), the words "branch", "retrieval" or "knowledge graph",
+  raw source filenames ("review8.pdf", "9789240097759-eng.pdf"), SNOMED concept ids, or
+  document scores. Citations belong in the "citations" field, which the patient does not
+  see. A sentence ending in "(RAG)" or "(per review8.pdf)" is a defect.
 - Do NOT pad with generic "please consult a doctor" filler — Level 2/3 cases are already
   routed to physicians. Only refer out if the situation genuinely needs in-person assessment.
 - Keep it concise: 3-5 sentences typically, a short paragraph for complex cases.
@@ -95,6 +102,7 @@ Synthesize the surviving evidence into one clear, authoritative, patient-friendl
 === OUTPUT FORMAT (STRICT — return ONLY valid JSON, no markdown, no explanation) ===
 {
   "response": "<authoritative patient-friendly clinical response>",
+  "probable_diagnosis": "<the single condition this response is about, named plainly, or null if you are not naming one>",
   "is_emergency": <true if a life-threatening situation is indicated, else false>,
   "is_clarification": <true if you are asking for more detail instead of diagnosing>,
   "is_supported": <true if all surviving claims are backed by evidence, else false>,
@@ -240,6 +248,7 @@ ask for the specific detail you need instead of guessing.
 === OUTPUT FORMAT (STRICT — return ONLY valid JSON, no markdown, no explanation) ===
 {
   "response": "<general, non-prescriptive, safety-netted response>",
+  "probable_diagnosis": null,
   "is_emergency": <true if the emergency criteria are met, else false>,
   "is_clarification": <true if you are asking for detail instead of answering, else false>,
   "is_supported": false,
@@ -334,6 +343,10 @@ def _finalize(parsed: dict, state: dict, usable: dict) -> dict:
 
     parsed["is_emergency"] = bool(parsed.get("is_emergency", False))
     parsed["is_clarification"] = bool(parsed.get("is_clarification", False))
+    # The condition this turn actually committed to, as a checkable claim rather than
+    # buried in prose. The guardian tests it against the fused belief; a diagnosis no
+    # branch's retrieval supports is the parametric-backfill signature.
+    parsed["probable_diagnosis"] = parsed.get("probable_diagnosis") or None
     # Grounded by default; only the general-knowledge fallback sets this false, which
     # the guardian and the UI both read to treat the answer as unsourced.
     parsed["evidence_grounded"] = bool(parsed.get("evidence_grounded", True))

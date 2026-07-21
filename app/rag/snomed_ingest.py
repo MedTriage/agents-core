@@ -44,7 +44,6 @@ CREATE TABLE relationship (
 
 # Built after the bulk load — writing to indexes during insert is far slower.
 INDEXES = """
-CREATE INDEX idx_desc_concept  ON description(concept_id);
 CREATE INDEX idx_rel_source    ON relationship(source_id, type_id, active);
 CREATE INDEX idx_rel_dest      ON relationship(destination_id, type_id, active);
 
@@ -121,6 +120,12 @@ def ingest(release_dir: str, db_path: str = SNOMED_DB_PATH):
         "INSERT OR REPLACE INTO description(id, concept_id, active, type_id, term) VALUES (?, ?, ?, ?, ?)",
         ((int(r[0]), int(r[4]), int(r[2]), int(r[6]), r[7]) for r in _rows(description_file)),
     )
+    conn.commit()
+
+    # This one index is built here rather than with the rest, because the FSN backfill
+    # below looks up descriptions by concept_id once per concept. Without it that is
+    # 534k full scans of a 1.7M-row table — hours instead of seconds.
+    conn.execute("CREATE INDEX idx_desc_concept ON description(concept_id)")
     conn.commit()
 
     # id, effectiveTime, active, moduleId, sourceId, destinationId, relationshipGroup, typeId, ...
