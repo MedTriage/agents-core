@@ -33,7 +33,7 @@ _SEMANTIC_TAG = re.compile(r"\s*\([^)]*\)\s*$")
 # Branch order is fixed but the names never ship. The client receives an anonymous
 # list — "three sources were consulted, two reported" — because which source is which
 # is exactly the internal detail patients must not see.
-_BRANCHES = ("rag_output", "kgrag_output", "mcp_output")
+_BRANCHES = ("parametric_output", "kgrag_output", "mcp_output")
 
 # Plain-language outcome reasons. Written here, never by a model: the guardian's own
 # `reasoning` field is LLM prose that names soft rules and internal levels.

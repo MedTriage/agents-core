@@ -4,7 +4,7 @@
 
 > Agentic AI for clinical triage, drug discovery, and remote digital healthcare, with a graduated autonomy architecture
 
-The core repository housing the six different agents which constitute the agentic workflow.
+The core repository housing the agents which constitute the agentic workflow.
 
 
 ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
@@ -15,25 +15,38 @@ The core repository housing the six different agents which constitute the agenti
 
 ### Agentic Workflow
 
-The system is built on a multi-agent architecture, built using LangGraph :
+The system is built on a multi-agent architecture, built using LangGraph:
 
-- **Intent Router** - Infers the intent of the query and accordingly routes to the desired agent
-- **Vision Agent** - Analyzes medical pictures and sends the findngs to the RAG agent
-- **RAG Agent** - Specialised RAG agent which retrieves relevant documents and performs a preliminary analysis
-- **Critic Agent** - Critiques the RAG's findings, in order to detect hallucinations and ground evidences and re-performs retrieval if necessary
-- **Guardian Agent** - After the critic's analysis, assigns risk scores and accordingly takes actions
+```
+                           ┌─→ Parametric Agent ─┐
+Scribe ─→ Intent Router ───┼─→ KG-RAG Agent ─────┼─→ Evidence Fusion ─→ Orchestrator ─→ Guardian
+                           └─→ MCP Agent ────────┘
+```
+
+- **Scribe** - Keeps a running medical record for each conversation (conditions, symptoms, medications, allergies), available to every other agent
+- **Intent Router** - Separates clinical queries from chitchat; chitchat goes straight to the orchestrator
+- **Parametric Agent** - Assesses the case from the model's own clinical knowledge
+- **KG-RAG Agent** - Checks candidate diagnoses against the SNOMED CT ontology and finds what tells them apart
+- **MCP Agent** - Queries live medical sources (FDA, WHO, PubMed, RxNorm) through the medical-mcp server
+- **Evidence Fusion** - Combines the KG-RAG and MCP evidence with Dempster-Shafer theory, independently of any model
+- **Orchestrator** - Reconciles the agents, checks for hallucination and emergencies, and writes the response
+- **Guardian Agent** - Assigns the risk level, with deterministic rules that a model cannot override downward
+
+Each response also carries a patient-safe explanation of how it was reached: how many sources were consulted and whether they agreed, without naming a disease or showing raw numbers.
 
 ### Risk Levels
 
 - **Level-I** - Simple queries and chitchat, directly answered to patient
-- **Level-II** - Most clinical queries, where the critic's analysis is sent to a doctor who verifies and approves it and sends it back to the patient
+- **Level-II** - Most clinical queries, where the assessment is sent to a doctor who verifies and approves it and sends it back to the patient
 - **Level-III** - Potential Life-threatening scenarios, the agents lock themselves and communicate with local authorities in order to provide assistance to the patient
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.9 or higher (ideally 3.11)
+- Python 3.10 or higher (ideally 3.11)
+- Node.js and npm, for the MCP server
+- A SNOMED CT RF2 release, which is free but licence-gated: request it from your National Release Center
 - Virtual environment (recommended)
 
 ### Installation
@@ -55,11 +68,21 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+4. Build the SNOMED CT knowledge graph for the KG-RAG agent (writes `data/snomed.db`):
+```bash
+python -m app.rag.snomed_ingest /path/to/SnomedCT_.../Snapshot
+```
+
+5. Build the MCP server for the MCP agent:
+```bash
+cd vendor/medical-mcp && npm install && npm run build
+```
+
 ### Configuration
 
 1. Set up your environment variables (create a `.env` file in the project root):
 ```bash
-GEMINI_API_KEY=your_api_key_here
+OPENROUTER_API_KEY=your_api_key_here
 ```
 ### Running the development server
 

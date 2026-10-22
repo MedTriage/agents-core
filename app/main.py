@@ -13,7 +13,9 @@ graph = build_graph()
 
 # Retrieval branches, in the order their anonymous slots appear to the client. The node
 # names stay server-side; what crosses the wire is an index and a status.
-_BRANCH_NODES = ("rag_node", "kgrag_node", "mcp_node")
+# Order must match explain._BRANCHES — the index is what crosses the wire, so a mismatch
+# silently attributes one source's status to another's slot.
+_BRANCH_NODES = ("parametric_node", "kgrag_node", "mcp_node")
 
 class InputRequest(BaseModel):
     conversation_id: str

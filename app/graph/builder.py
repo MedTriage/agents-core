@@ -4,17 +4,17 @@ from app.graph.state import AgentState
 
 from app.graph.nodes.scribe_node import scribe_node
 from app.graph.nodes.intent_node import intent_node
-from app.graph.nodes.rag_node import rag_node
+from app.graph.nodes.parametric_node import parametric_node
 from app.graph.nodes.kgrag_node import kgrag_node
 from app.graph.nodes.mcp_node import mcp_node
 from app.graph.nodes.dst_node import dst_node
 from app.graph.nodes.orchestrator_node import orchestrator_node
 from app.graph.nodes.guardian_node import guardian_node
 
-# Retrieval branches that fan out from the intent router and fan back in to the
-# orchestrator. Keys match the branch names the orchestrator uses in its hints.
+# Branches that fan out from the intent router and fan back in to the orchestrator. Keys
+# match the branch names the orchestrator uses in its hints.
 BRANCH_NODES = {
-    "rag": "rag_node",
+    "parametric": "parametric_node",
     "kgrag": "kgrag_node",
     "mcp": "mcp_node",
 }
@@ -22,7 +22,7 @@ BRANCH_NODES = {
 
 def route_after_intent(state: AgentState):
     """Chitchat goes straight to the orchestrator; anything clinical fans out to all
-    three retrieval branches in parallel."""
+    three branches in parallel."""
     if state.get("intent_type") == "chitchat":
         return ["orchestrator_node"]
 
@@ -47,7 +47,7 @@ def build_graph():
 
     builder.add_node("scribe_node", scribe_node)
     builder.add_node("intent_router", intent_node)
-    builder.add_node("rag_node", rag_node)
+    builder.add_node("parametric_node", parametric_node)
     builder.add_node("kgrag_node", kgrag_node)
     builder.add_node("mcp_node", mcp_node)
     builder.add_node("dst_node", dst_node)

@@ -1,17 +1,9 @@
 fastapi
 uvicorn
 langgraph
-langchain
-google-genai
 python-dotenv
 pydantic
 tenacity
 openai
-cerebras-cloud-sdk
 mcp
-pinecone
-pypdf
-tiktoken
 langsmith
-tqdm
-cerebras

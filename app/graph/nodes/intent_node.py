@@ -1,5 +1,5 @@
 import json
-from app.services.cerebras_client import generate_content
+from app.services.openai_client import generate_content
 from app.services.retry import retry_on_exception
 
 INTENT_PROMPT = """
