@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from app.services.cerebras_client import generate_content
+from app.services.openai_client import generate_content
 from app.services.retry import retry_on_exception
 from app.config import CONVERSATIONS_PATH
 
@@ -25,11 +25,23 @@ medical information from the message into the record and return the COMPLETE upd
 - Deduplicate: do not add an entry that is already present in substance.
 - Record symptoms in the patient's own terms. Do not translate them into diagnoses.
   "Chest tightness" is a symptom; "angina" is a diagnosis — never promote one to the other.
+- ONE COMPLAINT PER ENTRY, WITH ITS QUALIFIERS ATTACHED. A symptom's site, character,
+  severity, radiation, onset and timing are properties OF that symptom — they are not
+  separate symptoms. Write them into the one entry:
+    RIGHT: "burning epigastric pain, 4/10, radiating to the chest, worse after eating"
+    WRONG: "pain", "pain feels burning", "pain in epigastrium", "pain 4 out of 10",
+           "pain spreads to lower chest", "pain worse after eating"
+  This is load-bearing, not tidiness. Downstream agents weigh entries as peers, so
+  splitting one complaint into six makes it outweigh the fever, the rash and the fatigue
+  combined, and the clinical picture inverts.
+- Do NOT record a bare "pain somewhere" or "I have a symptom" entry that carries no
+  content — it exists only as a questionnaire artefact and displaces real findings.
 
 === FIELD DEFINITIONS ===
 - current_conditions: active diagnoses or conditions the patient says they have now.
 - past_conditions: resolved conditions, or conditions explicitly in the patient's history.
-- symptoms: what the patient is currently experiencing, with duration/severity if stated.
+- symptoms: what the patient is currently experiencing — one entry per distinct complaint,
+  each carrying its own site, character, severity, radiation and timing.
 - medications: drugs the patient says they are taking, with dose if stated.
 - allergies: stated allergies or adverse reactions.
 - demographics: age, sex, pregnancy status, or similar — only if the patient states them.
@@ -178,6 +190,27 @@ def format_record(record: dict) -> str:
         + "\n\n--- OTHER RECORDED FACTS ---\n"
         + json.dumps(other, indent=2)
     )
+
+
+def record_context(state: dict) -> str | None:
+    """The record rendered for a downstream prompt, or None when it adds nothing.
+
+    On the first turn of a conversation every entry in the record was extracted from the
+    very message the agent is already reading. The record cannot carry information the
+    message lacks — it can only carry LESS structure, because extraction flattens a
+    narrative into peer-weighted entries and a questionnaire-style presentation splits one
+    complaint across half a dozen of them. Including it there is strictly lossy.
+
+    This is the deterministic half of the fix. The prompt rules in SCRIBE_PROMPT ask the
+    model to group a complaint with its qualifiers, and that helps on later turns where
+    the record genuinely carries history; but a rule a model follows most of the time
+    cannot guarantee anything. On turn one the redundancy is decidable from the record's
+    own turn counter, so it is decided here instead of asked for.
+    """
+    record = state.get("scribe_output") or {}
+    if int(record.get("turn") or 0) <= 1 and not (state.get("chat_history") or []):
+        return None
+    return format_record(record)
 
 
 def _load_record(path: str) -> dict:

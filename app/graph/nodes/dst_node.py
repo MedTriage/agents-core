@@ -11,14 +11,32 @@ most confident one. Showing the model this node's verdict would let it copy the 
 and destroy the measurement. The two stay independent so the comparison means something.
 
 Advisory only at this stage: it writes `dst_output` and changes no routing.
+
+It fuses the EXTERNAL evidence sources only — KGRAG and MCP — and not the parametric
+branch. Three reasons, and they compound:
+
+- The parametric branch produces no retrieval signal. Every mass in this fusion is built
+  from something a model did not author (similarity scores, match quality, source
+  authority); all the parametric branch can offer is its own `confidence`, which is a
+  model's self-report about its own memory — precisely the quantity the fusion exists to
+  discipline.
+- Including it would put the orchestrator's own weights on both sides of the
+  DST-vs-orchestrator divergence measurement, which is the measurement this node exists
+  for.
+- It would make the guardian's zero-belief check vacuous: the diagnosis being audited
+  usually comes from the parametric branch, and a frame it helped build would support it
+  by construction.
+
+When neither external source commits, the fusion is vacuous and the audit abstains. That
+is the honest outcome, and its frequency is a coverage statistic worth reporting.
 """
 from app.services import dst
-from app.graph.nodes.orchestrator_node import BRANCHES, BRANCH_STATE_KEY
+from app.graph.nodes.orchestrator_node import BRANCH_STATE_KEY, RETRIEVAL_BRANCHES
 
 
 def dst_node(state):
     branch_outputs = {}
-    for branch in BRANCHES:
+    for branch in RETRIEVAL_BRANCHES:
         output = state.get(BRANCH_STATE_KEY[branch])
         # A branch that never ran is absent, which is different from one that ran and
         # found nothing — only the latter is evidence about the world.

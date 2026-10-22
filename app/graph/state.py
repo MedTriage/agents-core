@@ -17,10 +17,16 @@ class AgentState(TypedDict):
     intent_type: Optional[str]
     intent_confidence: Optional[float]
 
-    # Retrieval branches — each produces the same output shape so the
-    # orchestrator can treat them uniformly.
-    retrieved_context: Optional[str]  # RAG's Pinecone context, for grounding checks
-    rag_output: Optional[dict]
+    # Assessment branches — each produces the same output shape so the orchestrator can
+    # treat them uniformly.
+    # The two sourced branches also expose the raw evidence behind their conclusions so the
+    # orchestrator can audit them against source. Separate keys per branch, not one shared
+    # field: the branches run in the same superstep and concurrent writes to a single key
+    # are rejected by LangGraph. The parametric branch has no context key — it retrieves
+    # nothing, and there is no source to audit it against.
+    kgrag_context: Optional[str]  # KGRAG's matched SNOMED subgraph
+    mcp_context: Optional[str]  # MCP's raw tool output
+    parametric_output: Optional[dict]
     kgrag_output: Optional[dict]
     mcp_output: Optional[dict]
 
@@ -43,5 +49,7 @@ class AgentState(TypedDict):
     # Per-branch re-retrieval loop. The orchestrator is the sole writer of both:
     # parallel branches must not write shared keys (LangGraph rejects concurrent
     # updates to the same channel within a superstep).
-    branch_retry_counts: Optional[dict]      # {"rag": 0, "kgrag": 0, "mcp": 0}
-    branch_refinement_hints: Optional[dict]  # {"rag": "...", "kgrag": None, "mcp": None}
+    # Only the retrieval branches appear here — the parametric branch has nothing to look
+    # up a second time.
+    branch_retry_counts: Optional[dict]      # {"kgrag": 0, "mcp": 0}
+    branch_refinement_hints: Optional[dict]  # {"kgrag": "...", "mcp": None}

@@ -1,6 +1,6 @@
 """Dempster-Shafer evidence fusion over the retrieval branches.
 
-The orchestrator asks a language model to combine what RAG, KGRAG and MCP found. This
+The orchestrator asks a language model to combine what KGRAG and MCP found. This
 module computes the same fusion as an explicit calculus, so the two can be compared —
 and so the system has a quantity to act on that no model authored.
 
@@ -20,8 +20,8 @@ Two properties fall out that the code would otherwise have to special-case:
   in every hypothesis is zero by construction. The fusion cannot manufacture belief
   from nothing — that is a property of the operator, not a check someone remembered.
 
-Masses are built from RETRIEVAL signal only — similarity scores, match quality, subtype
-counts, source authority. The `confidence` float each branch reports is written by a
+Masses are built from RETRIEVAL signal only — match quality, subtype counts, source
+authority, evidence volume. The `confidence` float each branch reports is written by a
 language model about its own work and is deliberately never used here; building a
 rigorous calculus on self-reported numbers would be decoration.
 """
@@ -38,10 +38,8 @@ from app.config import (
     DST_MCP_TIER,
     DST_MCP_TIER_DEFAULT,
     DST_MCP_VOLUME_SCALE,
-    DST_RAG_SATURATION,
     DST_SPECIFICITY_SCALE,
     DST_UNRULED_MIN_PLAUSIBILITY,
-    RETRIEVAL_SCORE_THRESHOLD,
 )
 from app.services import snomed_store
 
@@ -153,22 +151,6 @@ def _clip(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-def _strength_rag(signal: dict) -> float:
-    scores = signal.get("scores") or []
-    if not scores:
-        return 0.0
-
-    # Everything here already cleared RETRIEVAL_SCORE_THRESHOLD, so that threshold is
-    # the natural zero point: a chunk sitting exactly at it carries no evidence.
-    span = DST_RAG_SATURATION - RETRIEVAL_SCORE_THRESHOLD
-    mean_score = sum(scores) / len(scores)
-    strength = _clip((mean_score - RETRIEVAL_SCORE_THRESHOLD) / span) if span > 0 else 0.0
-
-    n = len(scores)
-    coverage = DST_COVERAGE_FLOOR + (1 - DST_COVERAGE_FLOOR) * (n / (n + 1))
-    return strength * coverage
-
-
 def _strength_kgrag(signal: dict) -> float:
     concepts = signal.get("concepts") or []
     if not concepts:
@@ -208,7 +190,8 @@ def _strength_mcp(signal: dict) -> float:
     return tier * volume
 
 
-_STRENGTH = {"rag": _strength_rag, "kgrag": _strength_kgrag, "mcp": _strength_mcp}
+# The parametric branch has no entry: see dst_node for why it is excluded outright.
+_STRENGTH = {"kgrag": _strength_kgrag, "mcp": _strength_mcp}
 
 
 # --- Mass construction ---

@@ -1,35 +1,72 @@
 import json
-from app.services.cerebras_client import generate_content
+from app.services.openai_client import generate_content
 from app.services.retry import retry_on_exception
 from app.config import MAX_BRANCH_RETRIES
 
-# Retrieval branches the orchestrator fans in from. Kept in one place so routing,
-# retry accounting, and prompt construction cannot drift apart.
-BRANCHES = ["rag", "kgrag", "mcp"]
+# Branches the orchestrator fans in from. Kept in one place so routing, retry
+# accounting, and prompt construction cannot drift apart.
+BRANCHES = ["parametric", "kgrag", "mcp"]
 BRANCH_STATE_KEY = {
-    "rag": "rag_output",
+    "parametric": "parametric_output",
     "kgrag": "kgrag_output",
     "mcp": "mcp_output",
 }
 
+# The branches that actually go and look something up. The parametric branch is a single
+# call over the model's own weights, so two things that apply to the others do not apply
+# to it: it has no retrieval to send back for another attempt (asking the same weights
+# the same question yields the same answer, at the cost of a call), and it contributes no
+# retrieval signal for the Dempster-Shafer fusion to build belief mass from. Both the
+# retry planner and dst_node work from this list rather than BRANCHES.
+RETRIEVAL_BRANCHES = ["kgrag", "mcp"]
+
 ORCHESTRATOR_PROMPT = """
 You are the Meta-Orchestrator in a medical triage platform. You are the single point where
-independent evidence sources are reconciled into one clinical answer.
+independent evidence sources are reconciled into one clinical answer — and you are also the
+last clinician in the chain. Reconciling the agents is your first job, not your only one:
+where their evidence is thin, silent, or wrong, you are expected to supply the correct
+clinical answer yourself and say plainly that it is unsourced.
 
 You receive:
 1. The patient's cumulative medical record (from the Scribe)
-2. One or more independent retrieval agents' clinical assessments (RAG over clinical
-   guideline documents, KGRAG over the SNOMED CT knowledge graph, MCP over external
-   medical databases). Any of these may be absent.
-3. The retrieved source context that the RAG agent used
+2. One or more independent agents' clinical assessments. Any of these may be absent:
+   - PARAMETRIC — a physician's assessment formed from trained medical knowledge alone,
+     with no documents and no other agents' opinions in front of it. It is UNSOURCED by
+     construction and carries no citations. That is not a defect and does not make it
+     weak: it is the only agent that sees the whole presentation rather than whatever a
+     lookup happened to return.
+   - KGRAG — SNOMED CT ontology. It verifies which candidate disorders are real entities
+     and states what DEFINES them (causative agent, finding site, morphology). It is
+     strong on how to tell candidates apart and weak on which one is likeliest.
+   - MCP — live external medical databases (drug labels, literature, health statistics).
+     Strong on drugs, doses and current evidence.
+3. The source evidence behind the SOURCED agents' claims — KGRAG's matched SNOMED
+   subgraph and MCP's raw tool output. Audit each of them against its own evidence. The
+   parametric agent has no such block, by design; do not read its absence as a failed
+   retrieval. Long evidence may be truncated; judge grounding on what is shown, and do
+   not prefer an agent merely because its evidence reads as longer.
 4. The original user query
+5. Your own trained medical knowledge. This is a legitimate input, not a last resort.
+
+How to weigh the parametric agent against the sourced ones:
+   - Where it and a sourced agent AGREE, that is cross-source confirmation — say so,
+     raise confidence, and ground the answer in the sourced agent's citations.
+   - Where they CONFLICT, judge by reliability: evidence that specifically addresses THIS
+     presentation outranks it; vague or off-target evidence (about a different disease,
+     or a merely lexical match) does NOT. In the latter case keep the parametric
+     assessment and set evidence_grounded to false.
+   - Never override it merely because another agent is longer or carries a source tag.
+     An irrelevant citation is worth less than a sound unsourced assessment.
+   - If the parametric agent is the ONLY support for your answer, that answer is
+     unsourced: say what you believe, and set evidence_grounded to false.
 
 === YOUR RESPONSIBILITIES ===
 
 **Part 1: Evidence Synthesis (COMBINE — do NOT just pick one agent)**
-The retrieval agents are COMPLEMENTARY, not competitors, and each may hold a piece the
-others lack: RAG carries clinical-guideline text, KGRAG carries the differential map from the
-SNOMED hierarchy, MCP carries live drug labels and current literature. Your DEFAULT is to
+The agents are COMPLEMENTARY, not competitors, and each may hold a piece the others lack:
+PARAMETRIC carries the clinical judgement over the whole presentation, KGRAG carries what
+the ontology asserts distinguishes the candidates, MCP carries live drug labels and current
+literature. Your DEFAULT is to
 combine their evidence into one richer answer — NOT to adopt the single highest-confidence
 agent and discard the rest. Reproducing one agent's assessment verbatim while ignoring what
 the others found is a failure.
@@ -45,10 +82,43 @@ the others found is a failure.
   evidence strength, NOT majority vote: an agent citing a specific guideline outranks an agent
   asserting something unsourced. List every such disagreement in "conflicts". If the conflict
   is clinically material and you cannot resolve it on the evidence, set decision to "escalate".
+- DO NOT TRADE THE DIAGNOSIS FOR SAFETY. Your assessment names the condition the evidence
+  best supports — never a different, more dangerous one chosen because it would be worse to
+  miss. If the evidence supports a calf muscle strain, report a calf muscle strain, not
+  deep vein thrombosis; if it supports costochondritis, report costochondritis, not aortic
+  dissection. A dangerous alternative that genuinely needs excluding belongs in
+  "differentials", is named in the response together with the signs that would mean
+  seeking care urgently, and is handled by the triage layer downstream, which exists
+  precisely so that this field does not have to hedge. Swapping in a scarier diagnosis does
+  not make the patient safer. It makes the assessment wrong and the differential poorer,
+  and because your safety_risk, is_emergency and response all follow from it, it pushes a
+  benign case into physician review or emergency escalation where no one can do anything
+  more for the patient. Caution belongs in the differential and the response, never in the
+  diagnosis.
+- PRESERVE SPECIFICITY. Where an agent commits to a specific disease and you agree with it,
+  keep that disease. Generalising it to the category above ("influenza" to "viral upper
+  respiratory infection", "acute bronchitis" to "COPD exacerbation") reads as caution but
+  discards the only clinically actionable part of the answer. Broaden only when you have a
+  positive reason to doubt the specific claim, and then say what that reason is.
+- INADEQUATE EVIDENCE: an agent having retrieved *something* does not oblige you to adopt it.
+  If what came back does not actually support a specific diagnosis — vague or symptom-level
+  findings, or material about a different condition — do NOT take it merely because it is the
+  only thing on offer. Answer from your own general medical knowledge, name the condition
+  plainly, set evidence_grounded to false, and cite only what you actually received. An
+  honest unsourced answer is safer than a sourced-looking one resting on evidence that does
+  not fit, and far more useful than echoing a poor retrieval.
 
 **Part 2: Safety Audit**
-- HALLUCINATION CHECK: Is every claim traceable to that agent's cited evidence? Flag any
-  diagnosis, drug, dosage, or recommendation that is not.
+- HALLUCINATION CHECK: separate two things that are NOT the same defect.
+  FABRICATION (always a defect): an agent citing a source that does not say what it claims,
+  inventing a drug, dose, protocol, or study, or asserting a fact that is medically wrong.
+  Flag these, and set is_supported to false.
+  UNSOURCED (permitted, and must be declared): a claim that is medically sound but that no
+  agent retrieved evidence for — including a diagnosis you know to be correct that the agents
+  missed. This is NOT a hallucination. State it, set evidence_grounded to false, and cite
+  nothing you did not actually receive. Suppressing a correct diagnosis because retrieval was
+  poor is itself a failure, and a worse one for the patient than admitting the answer is
+  unsourced.
 - FABRICATED SYMPTOM CHECK: Did any agent attribute symptoms, descriptions, or history to
   the patient that they NEVER stated (in the query, the conversation, or the Scribe record)?
   If yes, this is critical — set is_supported to false and flag it.
@@ -72,7 +142,9 @@ Synthesize the surviving evidence into one clear, authoritative, patient-friendl
 - COMBINE, don't select: the response must reflect the POOLED evidence — the diagnosis
   supported across sources, the union of relevant differentials, and treatment/actions drawn
   from whichever agent supplied them. Never reproduce a single agent's answer while ignoring
-  what the others found.
+  what the others found. Pooling applies to what the agents actually supplied; where the pool
+  is empty or inadequate it does not oblige you to adopt it, and your own clinical judgement
+  fills the gap under the UNSOURCED rule above.
 - Be DIRECT and DEFINITIVE. This is a clinical decision support system, not a search engine.
 - Use accessible language but do NOT strip clinical specificity. Keep drug names, dosages,
   test names, and protocols where the evidence supports them.
@@ -81,9 +153,9 @@ Synthesize the surviving evidence into one clear, authoritative, patient-friendl
 - Reference sources inline ONLY as a patient would recognise them — the issuing body or
   publication ("Per WHO clinical guidelines...", "FDA labelling advises..."). The patient
   is the reader of this field and knows nothing about how this system is built.
-  NEVER write into "response": the names or tags of the internal agents (RAG, KGRAG, MCP,
-  orchestrator, guardian, scribe), the words "branch", "retrieval" or "knowledge graph",
-  raw source filenames ("review8.pdf", "9789240097759-eng.pdf"), SNOMED concept ids, or
+  NEVER write into "response": the names or tags of the internal agents (PARAMETRIC,
+  KGRAG, MCP, orchestrator, guardian, scribe), the words "branch", "retrieval",
+  "parametric" or "knowledge graph", raw source filenames, SNOMED concept ids, or
   document scores. Citations belong in the "citations" field, which the patient does not
   see. A sentence ending in "(RAG)" or "(per review8.pdf)" is a defect.
 - Do NOT pad with generic "please consult a doctor" filler — Level 2/3 cases are already
@@ -102,44 +174,71 @@ Synthesize the surviving evidence into one clear, authoritative, patient-friendl
 === OUTPUT FORMAT (STRICT — return ONLY valid JSON, no markdown, no explanation) ===
 {
   "response": "<authoritative patient-friendly clinical response>",
-  "probable_diagnosis": "<the single condition this response is about, named plainly, or null if you are not naming one>",
+  "probable_diagnosis": "<the single condition the response above is about, named plainly. If your response names a condition to the patient, this field MUST carry that same condition — the two are one answer in two forms and may not disagree. null is correct ONLY when the response names no condition at all: you are asking for clarification, or nothing could be identified. Do NOT promote a differential here that your response did not commit to. KEEP THE SPECIFIC DISEASE NAME: if the assessment you are agreeing with names a specific disease, carry that name through — do NOT replace it with the broader category it belongs to. 'Influenza' must not become 'viral upper respiratory infection'; 'acute bronchitis' must not become 'lower respiratory tract infection'. Where an agent gave a compound answer, keep the part that names the disease, not the part that names the syndrome.>",
+  "differentials": ["<the deduplicated union of the agents' differentials that survived your audit, most plausible first, excluding probable_diagnosis. [] if none survive>"],
   "is_emergency": <true if a life-threatening situation is indicated, else false>,
   "is_clarification": <true if you are asking for more detail instead of diagnosing>,
   "is_supported": <true if all surviving claims are backed by evidence, else false>,
-  "evidence_grounded": true,
+  "evidence_grounded": <true if probable_diagnosis and the recommended actions rest on the agents' retrieved evidence; false if that evidence was inadequate and you answered from your own general medical knowledge instead>,
   "conflicts": ["<disagreement between agents and how you resolved it>"],
-  "issues": ["<issue 1>", "<issue 2>"],
-  "safety_risk": "<low | moderate | high>",
+  "clinical_issues": ["<something about THIS ANSWER that could affect the patient: a recommendation needing supervision, a caveat that changes what they should do, an interaction with their record. [] if none. NEVER put retrieval or sourcing commentary here.>"],
+  "evidence_notes": ["<internal QA notes: what was retrieved, what was inferred rather than proven, truncated or missing sources, agent disagreement. Not shown to the triage layer.>"],
+  "safety_risk": "<low | moderate | high — HARM TO THIS PATIENT if they act on this answer. low: benign or self-limiting, and the advice cannot hurt them — this covers ordinary self-care guidance and over-the-counter remedies, and it is the CORRECT answer for the everyday business of primary care. moderate: a recommendation genuinely needs a clinician to supervise it (a prescription-only medicine, a procedure), or a treatable condition could be missed for long enough to matter. high: acting on this could cause serious harm. Judge the CONTENT only — never raise this because evidence was thin, sources were missing, or agents disagreed.>",
   "decision": "<approve | revise | escalate>",
   "confidence_adjusted": <float 0.0-1.0, your confidence after review>,
   "branch_issues": {
-    "rag": "<when decision is 'revise' AND this agent's evidence was weak/wrong: a specific query or keywords it should retrieve with next attempt. null otherwise>",
-    "kgrag": "<same, or null>",
-    "mcp": "<same, or null>"
+    "kgrag": "<when this agent's evidence was weak/wrong: the specific candidate disorders it should look up next attempt. null otherwise>",
+    "mcp": "<same — the specific drug, condition or literature question it should query. null otherwise>"
   }
 }
 
-Decision criteria:
-- "approve": evidence-aligned, safe, complete, no material conflict.
-- "revise": minor issues, weak retrieval, or a resolvable gap. Name the specific agent(s) at
-  fault in branch_issues with an actionable hint. Only name an agent that actually produced
-  output. The system re-runs ONLY the agents you name.
+Decision criteria. `decision` describes the CLINICAL status of your answer — never the
+state of the retrieval. Thin, absent, or off-target evidence is recorded in
+evidence_grounded and branch_issues, and re-retrieval is triggered by branch_issues
+alone; you do not need "revise" to make the agents run again.
+- "approve": the assessment is clinically sound and safe to deliver. Use this EVEN IF no
+  agent retrieved anything — an answer you know to be correct but could not source is
+  approved with evidence_grounded false. "I would have liked better evidence" is not a
+  clinical concern and must not be expressed as "revise": downstream, "revise" requires a
+  physician to check the answer, and a correct assessment of a benign condition does not
+  need one.
+- "revise": you have a CLINICAL concern about the answer itself — an agent jumped to a
+  diagnosis the symptoms do not justify, or the assessment is internally inconsistent.
+  Name the specific agent(s) at fault in branch_issues with an actionable hint. Only name
+  an agent that actually produced output. The system re-runs ONLY the agents you name.
+  The parametric agent has no entry there and cannot be re-run: it has nothing to look up
+  a second time, so a concern about it is yours to resolve here.
 - "escalate": unsafe recommendation, hallucinated claim, unresolvable material conflict, or
   high safety risk — a physician must review before the patient sees anything.
 
 === CONFIDENCE CALIBRATION (critical) ===
-confidence_adjusted reflects how clinically valid the OVERALL assessment is, not whether
-every minor detail is perfect:
-- 0.0: Completely unsupported, fabricated, or dangerously wrong. ONLY use 0.0 when the
-  diagnosis has no basis in the evidence or the patient's stated symptoms, OR when asking
-  for clarification (no diagnosis made).
-- 0.1-0.3: Mostly unsupported — major claims lack evidence.
-- 0.4-0.6: Partially supported — correct direction but significant gaps or assumptions.
-- 0.7-0.8: Well-supported with minor gaps or caveats (typical for "revise").
-- 0.9-1.0: Strongly supported, ideally corroborated by more than one agent.
-Do NOT drop confidence to 0.0 merely because an agent made reasonable clinical inferences
-from stated symptoms, or because the patient's phrasing was imprecise (e.g. "99 degrees"
-instead of "low-grade fever"). A "revise" with minor issues should typically be 0.5-0.8.
+confidence_adjusted is CLINICAL certainty: how strongly this patient's presentation
+supports your diagnosis over the alternatives. It is NOT a measure of how well-sourced
+the answer is. Whether a document was retrieved, how many agents agreed, and whether the
+corpus happened to cover this condition are all irrelevant here — evidence_grounded
+already records those. A textbook presentation you are certain of scores high even when
+nothing was retrieved for it.
+- 0.0: No basis in the patient's stated symptoms at all, or you are asking for
+  clarification rather than diagnosing.
+- 0.1-0.3: The presentation barely fits — you are guessing between many possibilities.
+- 0.4-0.6: The presentation is genuinely ambiguous; several conditions fit about equally.
+- 0.7-0.8: The presentation clearly fits, with a differential still worth considering.
+- 0.9-1.0: Textbook, unambiguous presentation of a condition you know well.
+Do NOT lower confidence because retrieval was thin, because only one agent spoke, or
+because the patient's phrasing was imprecise ("99 degrees" rather than "low-grade fever").
+Lower it only when the CLINICAL PICTURE itself is uncertain.
+
+=== SAFETY_RISK CALIBRATION (equally critical) ===
+"moderate" is not the default for "this is a real medical condition", and it is not a way
+to hedge. It is a claim that a clinician must see this answer before the patient acts on
+it, and downstream it is a HARD RULE: moderate forces the case to physician review no
+matter how benign it is. Over-calling it routes patients to clinicians who cannot change
+anything for them.
+- Self-limiting condition + self-care or over-the-counter advice = low. Always.
+- The recommendation being SPECIFIC does not make it risky. "Use a saline rinse" is
+  specific and low. Judge what could go wrong, not how detailed the answer is.
+- Reserve moderate for a recommendation that genuinely needs supervision, or a real
+  prospect of a treatable condition being missed. If you cannot name the harm, it is low.
 """
 
 CHITCHAT_PROMPT = """
@@ -191,7 +290,7 @@ crisis, contact the 988 Suicide & Crisis Lifeline by calling or texting 988."
   "safety_risk": "<low, or high if is_emergency is true>",
   "decision": "<approve, or escalate if is_emergency is true>",
   "confidence_adjusted": 1.0,
-  "branch_issues": {"rag": null, "kgrag": null, "mcp": null}
+  "branch_issues": {"kgrag": null, "mcp": null}
 }
 
 === USER INPUT ===
@@ -205,19 +304,21 @@ ESCALATE_OUTPUT = {
     "is_emergency": False,
     "is_clarification": False,
     "is_supported": False,
+    "differentials": [],
     "conflicts": [],
     "issues": ["No usable evidence from any retrieval agent"],
     "safety_risk": "high",
     "decision": "escalate",
     "confidence_adjusted": 0.0,
-    "branch_issues": {b: None for b in BRANCHES},
+    "branch_issues": {b: None for b in RETRIEVAL_BRANCHES},
 }
 
 
 NO_EVIDENCE_PROMPT = """
 You are the Meta-Orchestrator in a medical triage platform. For THIS query, none of the
-retrieval sources (clinical-guideline search, the SNOMED differential map, and the live
-medical databases) returned usable evidence. You must still respond safely and honestly.
+assessing agents (the clinical-knowledge assessment, the SNOMED ontology check, and the
+live medical databases) returned anything usable. You must still respond safely and
+honestly.
 
 === HOW TO RESPOND ===
 - Answer ONLY from general, well-established medical knowledge — the kind of basic guidance
@@ -248,7 +349,8 @@ ask for the specific detail you need instead of guessing.
 === OUTPUT FORMAT (STRICT — return ONLY valid JSON, no markdown, no explanation) ===
 {
   "response": "<general, non-prescriptive, safety-netted response>",
-  "probable_diagnosis": null,
+  "probable_diagnosis": "<the condition your response is about, named plainly, or null ONLY if your response names no condition at all. Answering from general knowledge does NOT mean withholding this — evidence_grounded below already records that it is unsourced.>",
+  "differentials": ["<other conditions your response weighed, most plausible first. [] if none>"],
   "is_emergency": <true if the emergency criteria are met, else false>,
   "is_clarification": <true if you are asking for detail instead of answering, else false>,
   "is_supported": false,
@@ -267,6 +369,47 @@ def call_model(prompt: str):
     return generate_content(prompt)
 
 
+# Per-branch cap on raw evidence shown to the orchestrator. KGRAG subgraphs and MCP tool
+# dumps are unbounded in principle; a turn already costs ~50k tokens on long narratives.
+BRANCH_CONTEXT_CHARS = 4000
+
+
+def _grounding_context(state) -> str:
+    """The source evidence behind the sourced agents' claims.
+
+    Only the retrieval branches appear here: they are the ones whose claims can be checked
+    against something. The parametric branch has no source block by construction, and its
+    absence must not be read as a failed retrieval — the prompt says so explicitly.
+
+    Each branch is capped independently so one verbose retrieval cannot crowd out the
+    other's evidence, which would silently discount the quieter branch under a safety
+    audit that flags anything not traceable to what was retrieved.
+    """
+    sections = []
+
+    for label, key in (
+        ("KGRAG (matched SNOMED subgraph)", "kgrag_context"),
+        ("MCP (raw external database output)", "mcp_context"),
+    ):
+        raw = state.get(key)
+        if not raw:
+            continue
+        text = raw if len(raw) <= BRANCH_CONTEXT_CHARS else (
+            raw[:BRANCH_CONTEXT_CHARS]
+            + f"\n(truncated at {BRANCH_CONTEXT_CHARS} characters — "
+            "judge grounding on what is shown.)"
+        )
+        sections.append(f"--- {label} ---\n{text}")
+
+    if not sections:
+        return (
+            "(No sourced agent returned evidence this turn. Any answer you give rests on "
+            "clinical knowledge alone — set evidence_grounded to false.)"
+        )
+
+    return "\n\n".join(sections)
+
+
 def _usable_branches(state) -> dict:
     """Branches that actually produced evidence this turn.
 
@@ -282,6 +425,19 @@ def _usable_branches(state) -> dict:
             continue
         usable[branch] = output
     return usable
+
+
+# Branch-output keys that are plumbing, not evidence, and must not reach the prompt.
+# `graph` is the interface's node-and-edge payload — 60-odd nodes with a few hundred
+# attribute links, and on its own two thirds of this prompt. `retrieval_signal` is the
+# raw belief-mass input (bm25 ranks, chunk counts, byte volumes), deliberately kept away
+# from any model: it is evidence about the retrieval, not about the patient, and it reads
+# as a confidence score the branch never claimed.
+_NON_EVIDENCE_KEYS = ("graph", "retrieval_signal")
+
+
+def _agent_view(output: dict) -> dict:
+    return {k: v for k, v in output.items() if k not in _NON_EVIDENCE_KEYS}
 
 
 def _requests_clarification(output: dict) -> bool:
@@ -314,11 +470,20 @@ def _plan_retries(parsed: dict, state: dict, usable: dict):
     counts = dict(state.get("branch_retry_counts") or {})
     hints = {}
 
-    if parsed.get("decision") != "revise":
+    # Gated on branch_issues, not on decision. `decision` now describes the clinical
+    # status of the answer, and "revise" is read downstream as "a physician must check
+    # this" — tying re-retrieval to it meant the only way to ask an agent to search again
+    # was to also demand physician review. That converted every evidence gap into an
+    # oversight requirement, and over-triaged benign cases the orchestrator had itself
+    # called "clinically sound but not directly supported".
+    if not (parsed.get("branch_issues") or {}):
         return counts, hints
 
     branch_issues = parsed.get("branch_issues") or {}
-    for branch in BRANCHES:
+    # RETRIEVAL_BRANCHES, not BRANCHES: a hint naming the parametric branch is not
+    # actionable — there is nothing for it to look up again — and honouring one would
+    # spend a call to ask the same weights the same question.
+    for branch in RETRIEVAL_BRANCHES:
         hint = branch_issues.get(branch)
         if not hint or branch not in usable:
             continue
@@ -328,6 +493,30 @@ def _plan_retries(parsed: dict, state: dict, usable: dict):
         counts[branch] = counts.get(branch, 0) + 1
 
     return counts, hints
+
+
+def _clean_differentials(raw, probable_diagnosis) -> list:
+    """Coerce the model's differential list to unique, non-empty strings.
+
+    Order is the model's own ranking and is preserved. The top diagnosis is dropped if it
+    reappears here, so `probable_diagnosis` and `differentials` stay disjoint the way the
+    retrieval agents' outputs already are.
+    """
+    if not isinstance(raw, list):
+        return []
+
+    top = str(probable_diagnosis or "").strip().lower()
+    seen, cleaned = set(), []
+
+    for item in raw:
+        label = str(item or "").strip()
+        key = label.lower()
+        if not label or key == top or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(label)
+
+    return cleaned
 
 
 def _finalize(parsed: dict, state: dict, usable: dict) -> dict:
@@ -347,6 +536,14 @@ def _finalize(parsed: dict, state: dict, usable: dict) -> dict:
     # buried in prose. The guardian tests it against the fused belief; a diagnosis no
     # branch's retrieval supports is the parametric-backfill signature.
     parsed["probable_diagnosis"] = parsed.get("probable_diagnosis") or None
+    # The differential the turn actually weighed. The agents produce these in quantity —
+    # the SNOMED IS_A walk alone yields several per turn — and until this field existed
+    # they reached the prose response and nothing else, so a level_2 case arrived at the
+    # physician as a bare diagnosis. Normalised here rather than trusted from the model:
+    # deduplicated case-insensitively, and the top diagnosis is not repeated among them.
+    parsed["differentials"] = _clean_differentials(
+        parsed.get("differentials"), parsed["probable_diagnosis"]
+    )
     # Grounded by default; only the general-knowledge fallback sets this false, which
     # the guardian and the UI both read to treat the answer as unsourced.
     parsed["evidence_grounded"] = bool(parsed.get("evidence_grounded", True))
@@ -409,7 +606,14 @@ def _handle_no_evidence(state) -> dict:
         if "response" not in parsed:
             raise ValueError("Missing required key in no-evidence response: response")
 
-        parsed.setdefault("is_supported", False)
+        # is_supported means "no claim here was FABRICATED" — an agent citing a source
+        # that does not say what it claims, an invented drug or dose, a medically wrong
+        # assertion. Nothing on this path is fabricated: it is ordinary general knowledge
+        # with no document behind it, which is what evidence_grounded=False records.
+        # Defaulting it to False conflated "unsourced" with "unsupported", and the
+        # guardian — which receives one boolean and cannot tell them apart — read a
+        # missing corpus document as a fabrication signal and escalated benign turns.
+        parsed.setdefault("is_supported", True)
         parsed["evidence_grounded"] = False
         parsed.setdefault("conflicts", [])
         parsed.setdefault(
@@ -422,7 +626,7 @@ def _handle_no_evidence(state) -> dict:
         # so a benign general answer is not locked to level_3 merely for lacking sources.
         conf = float(parsed.get("confidence_adjusted", 0.5))
         parsed["confidence_adjusted"] = max(0.4, min(0.6, conf))
-        parsed["branch_issues"] = {b: None for b in BRANCHES}
+        parsed["branch_issues"] = {b: None for b in RETRIEVAL_BRANCHES}
 
         return _finalize(parsed, state, usable={})
 
@@ -447,7 +651,7 @@ def _handle_chitchat(state) -> dict:
         if "response" not in parsed:
             raise ValueError("Missing required key in orchestrator response: response")
 
-        parsed["branch_issues"] = {b: None for b in BRANCHES}
+        parsed["branch_issues"] = {b: None for b in RETRIEVAL_BRANCHES}
         return _finalize(parsed, state, usable={})
 
     except Exception as e:
@@ -465,7 +669,7 @@ def _handle_chitchat(state) -> dict:
             "safety_risk": "low",
             "decision": "approve",
             "confidence_adjusted": 1.0,
-            "branch_issues": {b: None for b in BRANCHES},
+            "branch_issues": {b: None for b in RETRIEVAL_BRANCHES},
             "error": str(e),
         }
         return {
@@ -479,6 +683,55 @@ def _handle_chitchat(state) -> dict:
         }
 
 
+REQUIRED_SYNTHESIS_KEYS = [
+    "response",
+    "is_supported",
+    "clinical_issues",
+    "safety_risk",
+    "decision",
+    "confidence_adjusted",
+]
+
+
+def _parse_synthesis(raw: str) -> dict:
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError("No JSON object found in orchestrator output")
+
+    parsed = json.loads(raw[start:end])
+
+    missing = [key for key in REQUIRED_SYNTHESIS_KEYS if key not in parsed]
+    if missing:
+        raise ValueError(
+            f"Missing required key in orchestrator response: {', '.join(missing)}"
+        )
+    return parsed
+
+
+def _synthesize(prompt: str) -> dict:
+    """Run the synthesis call, with one corrective retry on malformed output.
+
+    The same pattern the KGRAG branch already uses, and for the same reason:
+    `@retry_on_exception` replays the identical prompt, while this tells the model what
+    was wrong with its answer. The usual failure is `Expecting ',' delimiter` deep inside
+    the long `response` string, an unescaped quote or newline rather than a model that
+    cannot follow the schema. Without the retry each one cost a completed synthesis:
+    every branch had already run, and the turn was escalated over a stray character.
+    """
+    try:
+        return _parse_synthesis(call_model(prompt))
+    except (ValueError, TypeError, json.JSONDecodeError) as first_error:
+        correction = (
+            "\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n"
+            f"{first_error}\n"
+            "Return ONE valid JSON object containing every required key. Take particular "
+            "care inside long string values: any double quote must be written \\\" and "
+            "any line break \\n. Do not emit a raw newline inside a string."
+        )
+        return _parse_synthesis(call_model(prompt + correction))
+
+
 def _handle_clinical(state) -> dict:
     usable = _usable_branches(state)
 
@@ -486,13 +739,22 @@ def _handle_clinical(state) -> dict:
     if not usable:
         return _escalate("No retrieval agent produced usable evidence", state)
 
-    # If every agent that ran deliberately withheld a diagnosis and asked for more
-    # detail, pass that through. Do not let synthesis manufacture the diagnosis the
-    # agents intentionally declined to make.
-    if all(_requests_clarification(o) for o in usable.values()):
+    # An agent deliberately withheld a diagnosis and asked for more detail, and nothing
+    # else found evidence: pass the question through rather than letting synthesis
+    # manufacture the diagnosis that agent intentionally declined to make.
+    #
+    # Requiring UNANIMOUS clarification, as this once did, stopped working when the
+    # parametric branch replaced RAG. Only that branch can ask a question — KGRAG either
+    # links concepts or reports "Insufficient evidence", and MCP either returns tool
+    # output or does not, so neither can ever satisfy a unanimity rule. A declining
+    # branch is abstaining, not disagreeing, and treating it as a dissenting vote killed
+    # the clarification path outright: every vague query fell through to the
+    # general-knowledge answer, and with it one of the two routes to level_1.
+    clarifying = [o for o in usable.values() if _requests_clarification(o)]
+    if clarifying and not any(_has_evidence(o) for o in usable.values()):
         questions = []
         differentials = []
-        for output in usable.values():
+        for output in clarifying:
             questions.extend(output.get("recommended_actions", []))
             differentials.extend(output.get("differentials", []))
 
@@ -515,6 +777,9 @@ def _handle_clinical(state) -> dict:
 
         output = {
             "response": response,
+            # This path never reaches _finalize, so the union computed above has to be
+            # carried onto the output here or it would survive only inside the prose.
+            "differentials": differentials,
             "is_emergency": False,
             "is_clarification": True,
             "is_supported": True,
@@ -523,7 +788,7 @@ def _handle_clinical(state) -> dict:
             "safety_risk": "low",
             "decision": "approve",
             "confidence_adjusted": 0.0,
-            "branch_issues": {b: None for b in BRANCHES},
+            "branch_issues": {b: None for b in RETRIEVAL_BRANCHES},
         }
         return {
             "orchestrator_output": output,
@@ -542,7 +807,7 @@ def _handle_clinical(state) -> dict:
         return _handle_no_evidence(state)
 
     agent_sections = "\n\n".join(
-        f"--- {branch.upper()} AGENT ---\n{json.dumps(output, indent=2)}"
+        f"--- {branch.upper()} AGENT ---\n{json.dumps(_agent_view(output), indent=2)}"
         for branch, output in usable.items()
     )
     absent = [b for b in BRANCHES if b not in usable]
@@ -551,7 +816,7 @@ def _handle_clinical(state) -> dict:
         ORCHESTRATOR_PROMPT
         + "\n\n=== SCRIBE RECORD (patient's cumulative medical state) ===\n"
         + json.dumps(state.get("scribe_output") or {}, indent=2)
-        + "\n\n=== RETRIEVAL AGENT OUTPUTS ===\n"
+        + "\n\n=== AGENT OUTPUTS ===\n"
         + agent_sections
         + (
             f"\n\n(Agents that produced no output this turn: {', '.join(absent)}. "
@@ -559,33 +824,23 @@ def _handle_clinical(state) -> dict:
             if absent
             else ""
         )
-        + "\n\n=== RETRIEVED SOURCE CONTEXT (used by the RAG agent) ===\n"
-        + (state.get("retrieved_context") or "(No context available)")
+        + "\n\n=== RETRIEVED SOURCE EVIDENCE (per sourced agent — audit each against its own) ===\n"
+        + _grounding_context(state)
         + "\n\n=== ORIGINAL USER QUERY ===\n"
         + state.get("user_input", "")
     )
 
     try:
-        raw = call_model(prompt)
+        parsed = _synthesize(prompt)
 
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        if start == -1 or end == 0:
-            raise ValueError("No JSON object found in orchestrator output")
-
-        parsed = json.loads(raw[start:end])
-
-        required_keys = [
-            "response",
-            "is_supported",
-            "issues",
-            "safety_risk",
-            "decision",
-            "confidence_adjusted",
-        ]
-        for key in required_keys:
-            if key not in parsed:
-                raise ValueError(f"Missing required key in orchestrator response: {key}")
+        # `issues` is what the guardian reads, and it must carry ONLY things bearing on
+        # the patient. Retrieval commentary now travels separately in evidence_notes and
+        # never reaches the triage layer: on V37 the guardian was handed "inferred from
+        # the clinical picture rather than explicitly proven by the retrieved subgraph"
+        # and "MCP evidence is truncated" — provenance notes it read as caveats about a
+        # canker sore, and escalated to physician review on the strength of them.
+        parsed["evidence_notes"] = parsed.get("evidence_notes") or []
+        parsed["issues"] = parsed.pop("clinical_issues", None) or []
 
         return _finalize(parsed, state, usable)
 

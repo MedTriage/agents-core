@@ -208,7 +208,6 @@ __marimo__/
 
 # CLAUDE.MD
 CLAUDE.md
-implementation.md
 # Scribe per-conversation state (runtime artifacts)
 data/conversations/
 docs/
@@ -217,6 +216,3 @@ data/snomed.db
 # Source ontology releases. SNOMED CT's Affiliate Licence permits use, not
 # redistribution — the RF2 release must never be committed.
 data/ontology/
-
-# Per-turn traces (offline analysis artifacts)
-data/traces/

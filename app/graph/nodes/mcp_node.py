@@ -1,8 +1,7 @@
 """MCP retrieval branch — external medical databases via the medical-mcp server.
 
-Queries live authoritative sources (FDA, WHO, PubMed, RxNorm, Google Scholar, AAP)
-that are not in the local Pinecone corpus. This is the branch that extends disease
-coverage beyond the ingested PDFs.
+Queries live authoritative sources (FDA, WHO, PubMed, RxNorm, Google Scholar, AAP),
+so the system's evidence is current rather than limited to what is stored locally.
 
 Two LLM calls per turn: one to pick the right tool for the query, one to turn the
 tool's raw text output into the shared branch-output shape.
@@ -10,7 +9,7 @@ tool's raw text output into the shared branch-output shape.
 import json
 
 from app.services import mcp_client
-from app.services.cerebras_client import generate_content
+from app.services.openai_client import generate_content
 from app.services.retry import retry_on_exception
 
 TOOL_SELECTION_PROMPT = """
@@ -63,9 +62,15 @@ structured clinical assessment for the downstream orchestrator.
 - Do NOT fabricate or infer patient symptoms that were not stated in the query or the
   patient record.
 - The evidence comes from a database search and may be only partially relevant — search
-  results are not guaranteed to match the query. If the evidence does not actually
-  address the patient's question, say so via "Insufficient evidence" and confidence 0.0
-  rather than stretching it to fit.
+  results are not guaranteed to match the query.
+- COMMIT when the evidence bears on the presentation: name the single candidate the
+  retrieved evidence best supports as probable_diagnosis, with confidence calibrated to
+  how strongly it supports that candidate over the others. Literature that discusses the
+  condition this patient plausibly has IS support — partial relevance lowers confidence,
+  it does not mean you retrieved nothing. A downstream orchestrator weighs your answer
+  against other sources; "Insufficient evidence" removes your evidence from that
+  weighing entirely, so reserve it for retrievals that genuinely do not bear on this
+  presentation at all (wrong disease family, pure statistics, off-topic hits).
 - Confidence must reflect how well the retrieved evidence supports the conclusion.
 
 === CITATIONS ===
@@ -134,19 +139,8 @@ def _build_query_context(state) -> str:
     return "\n\n".join(parts)
 
 
-def _select_tool(tools: list[dict], query_context: str) -> dict:
-    """Ask the model which tool to call, then validate its answer against the real schemas."""
-    tool_list = "\n".join(
-        f"- {t['name']}: {t['description']}\n"
-        f"  args: {json.dumps(t['schema'].get('properties', {}))}\n"
-        f"  required: {t['schema'].get('required', [])}"
-        for t in tools
-    )
-
-    raw = call_model(
-        TOOL_SELECTION_PROMPT + tool_list + "\n\n=== PATIENT CONTEXT ===\n" + query_context
-    )
-
+def _parse_tool_choice(raw: str, tools: list[dict]) -> dict:
+    """Validate one tool-selection answer against the real schemas."""
     start = raw.find("{")
     end = raw.rfind("}") + 1
     if start == -1 or end == 0:
@@ -175,8 +169,82 @@ def _select_tool(tools: list[dict], query_context: str) -> dict:
     return {"tool": tool_name, "arguments": arguments}
 
 
+def _select_tool(tools: list[dict], query_context: str) -> dict:
+    """Ask the model which tool to call, then validate its answer against the real schemas.
+
+    One corrective retry on a rejected answer. This is not the same thing as
+    `@retry_on_exception`, which replays an identical prompt and would reproduce a
+    deterministic mistake: here the second attempt is *told what it got wrong*.
+
+    It earns its place — an invented-but-plausible tool name ("search-medical-guidelines")
+    was by far the most common failure in the branch. A rejected
+    choice previously killed the whole branch, which cost the turn every piece of live
+    evidence MCP would have contributed.
+
+    The correction deliberately re-states the valid names rather than snapping the answer
+    to the nearest one: dispatching a tool the model did not choose would silently
+    retrieve the wrong evidence, which is worse than retrieving none.
+    """
+    tool_list = "\n".join(
+        f"- {t['name']}: {t['description']}\n"
+        f"  args: {json.dumps(t['schema'].get('properties', {}))}\n"
+        f"  required: {t['schema'].get('required', [])}"
+        for t in tools
+    )
+
+    prompt = (
+        TOOL_SELECTION_PROMPT + tool_list + "\n\n=== PATIENT CONTEXT ===\n" + query_context
+    )
+
+    try:
+        return _parse_tool_choice(call_model(prompt), tools)
+    except (ValueError, json.JSONDecodeError) as first_error:
+        correction = (
+            "\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n"
+            f"{first_error}\n"
+            "Choose EXACTLY ONE name from this list, copied character for character. "
+            "Do not invent a name, however plausible it sounds:\n"
+            + "\n".join(f"- {t['name']}" for t in tools)
+        )
+        return _parse_tool_choice(call_model(prompt + correction), tools)
+
+
+REQUIRED_SYNTHESIS_KEYS = [
+    "probable_diagnosis",
+    "differentials",
+    "recommended_actions",
+    "citations",
+    "confidence",
+]
+
+
+def _parse_synthesis(raw: str) -> dict:
+    """Validate one synthesis answer. Reports every missing key, not just the first,
+    so a corrective retry can fix them all in one attempt."""
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError("No JSON object found in synthesis output")
+
+    parsed = json.loads(raw[start:end])
+
+    missing = [k for k in REQUIRED_SYNTHESIS_KEYS if k not in parsed]
+    if missing:
+        raise ValueError(f"Missing required keys in synthesis response: {missing}")
+
+    parsed["confidence"] = max(0.0, min(1.0, float(parsed["confidence"])))
+    return parsed
+
+
 def _synthesize(evidence: str, query_context: str, tool_name: str) -> dict:
-    raw = call_model(
+    """Turn the tool's raw text into the shared branch-output shape.
+
+    One corrective retry, for the same reason as `_select_tool`: `@retry_on_exception`
+    replays an identical prompt and reproduces a deterministic omission, whereas this
+    tells the model which keys it left out. A dropped key previously killed the branch
+    outright, discarding evidence that had already been retrieved and paid for.
+    """
+    prompt = (
         SYNTHESIS_PROMPT
         + "\n\n=== RETRIEVED EVIDENCE (from "
         + tool_name
@@ -186,28 +254,16 @@ def _synthesize(evidence: str, query_context: str, tool_name: str) -> dict:
         + query_context
     )
 
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    if start == -1 or end == 0:
-        raise ValueError("No JSON object found in synthesis output")
-
-    parsed = json.loads(raw[start:end])
-
-    required_keys = [
-        "probable_diagnosis",
-        "differentials",
-        "recommended_actions",
-        "citations",
-        "confidence",
-    ]
-    for key in required_keys:
-        if key not in parsed:
-            raise ValueError(f"Missing required key in synthesis response: {key}")
-
-    confidence = float(parsed["confidence"])
-    parsed["confidence"] = max(0.0, min(1.0, confidence))
-
-    return parsed
+    try:
+        return _parse_synthesis(call_model(prompt))
+    except (ValueError, TypeError, json.JSONDecodeError) as first_error:
+        correction = (
+            "\n\n=== YOUR PREVIOUS ANSWER WAS REJECTED ===\n"
+            f"{first_error}\n"
+            "Return a single JSON object containing EVERY one of these keys:\n"
+            + "\n".join(f"- {k}" for k in REQUIRED_SYNTHESIS_KEYS)
+        )
+        return _parse_synthesis(call_model(prompt + correction))
 
 
 def mcp_node(state):
@@ -241,7 +297,12 @@ def mcp_node(state):
             "evidence_chars": len(evidence),
         }
 
-        return {"mcp_output": output}
+        # Same reason as kgrag_context: the orchestrator cannot audit a claim whose
+        # evidence it never sees, and an unauditable branch gets discounted by default.
+        return {
+            "mcp_output": output,
+            "mcp_context": f"[tool: {choice['tool']}]\n{evidence}",
+        }
 
     except Exception as e:
         # An "error" output makes the orchestrator drop this branch as unusable rather
