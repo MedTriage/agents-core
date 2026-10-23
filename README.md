@@ -46,6 +46,7 @@ Each response also carries a patient-safe explanation of how it was reached: how
 
 - Python 3.10 or higher (ideally 3.11)
 - Node.js and npm, for the MCP server
+- Podman (or Docker), for the local PostgreSQL database
 - A SNOMED CT RF2 release, which is free but licence-gated: request it from your National Release Center
 - Virtual environment (recommended)
 
@@ -80,10 +81,40 @@ cd vendor/medical-mcp && npm install && npm run build
 
 ### Configuration
 
-1. Set up your environment variables (create a `.env` file in the project root):
+Copy `.env.example` to `.env` and fill it in. `OPENROUTER_API_KEY` and the database settings are required. Without the Gmail settings (`SMTP_USER`, `SMTP_APP_PASSWORD`), emails queue in the database and are not sent.
+
+### Database
+
+Accounts, profiles, conversations and the doctor review queue live in PostgreSQL. Start it once (the image is about 300 MB), bound to this machine only:
+
 ```bash
-OPENROUTER_API_KEY=your_api_key_here
+set -a; . ./.env; set +a
+podman run -d --name medtriage-db --restart unless-stopped \
+  -e POSTGRES_USER=medtriage -e POSTGRES_PASSWORD="$MEDTRIAGE_DB_PASSWORD" -e POSTGRES_DB=medtriage \
+  -p 127.0.0.1:5432:5432 -v medtriage-pgdata:/var/lib/postgresql/data \
+  docker.io/library/postgres:17-alpine
 ```
+
+Then create the tables, and again after pulling any schema change:
+
+```bash
+alembic upgrade head
+```
+
+Later, `podman start medtriage-db` brings it back. To remove the database and all its data:
+
+```bash
+podman rm -f medtriage-db && podman volume rm medtriage-pgdata && podman rmi postgres:17-alpine
+```
+
+### Doctor accounts
+
+Doctors are invited from the command line; there is no public doctor sign-up. The invitation email is sent by the running API.
+
+```bash
+python -m app.admin invite-doctor doctor@example.com --name "Dr Rao"
+```
+
 ### Running the development server
 
 Start the API server with Uvicorn:
@@ -100,6 +131,16 @@ The API will be available at:
 - **Local**: http://localhost:8000
 - **API Documentation**: http://localhost:8000/docs (Swagger UI)
 - **Alternative Docs**: http://localhost:8000/redoc (ReDoc)
+
+### Tests
+
+The tests run against a separate `medtriage_test` database in the same container, with the LLM pipeline stubbed, so they cost nothing and need no network:
+
+```bash
+podman exec medtriage-db psql -U medtriage -d medtriage -c "create database medtriage_test"   # once
+pip install -r requirements-dev.txt
+pytest
+```
 
 
 ## Contributing

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>{% block title %}MedTriage{% endblock %}</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f6f5;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f6f5;">
+  <tr>
+    <td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;border:1px solid #dce0df;background:#ffffff;">
+        <tr>
+          <td style="background:#090907;padding:20px 28px;">
+            <img src="cid:{{ logo_cid }}" width="220" height="42" alt="MedTriage" style="display:block;border:0;outline:none;">
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px 28px 8px 28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#14181b;">
+            <h1 style="margin:0 0 16px 0;font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-0.01em;">{% block heading %}{% endblock %}</h1>
+            <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">Hi {{ name }},</p>
+            {% block body %}{% endblock %}
+          </td>
+        </tr>
+        {% if link is defined %}
+        <tr>
+          <td style="padding:8px 28px 8px 28px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="background:#14181b;">
+                  <a href="{{ link }}" style="display:inline-block;padding:12px 22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;">{% block action %}{% endblock %}</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 28px 0 28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#5c6672;">
+            If the button doesn't work, copy this address into your browser:<br>
+            <a href="{{ link }}" style="color:#5c6672;word-break:break-all;">{{ link }}</a>
+          </td>
+        </tr>
+        {% endif %}
+        <tr>
+          <td style="padding:28px 28px 28px 28px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="border-top:1px solid #dce0df;padding-top:16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.5;color:#5c6672;">
+                  You're receiving this because of a MedTriage account at this address. MedTriage is a research demo, not a medical service. In an emergency, call your local emergency number.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>

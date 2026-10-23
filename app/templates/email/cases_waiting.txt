@@ -1,0 +1,5 @@
+Hi {{ name }},
+
+There are new cases in the MedTriage review queue:
+
+{{ link }}

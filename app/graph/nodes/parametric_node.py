@@ -22,7 +22,7 @@ Two consequences are deliberate:
 """
 import json
 
-from app.graph.nodes.scribe_node import record_context
+from app.graph.nodes.scribe_node import background_context, record_context
 from app.services.openai_client import generate_content
 from app.services.retry import retry_on_exception
 
@@ -151,6 +151,10 @@ def _build_context(state) -> str:
             "use this for history the patient has not repeated.) ===\n"
             + record
         )
+
+    background = background_context(state)
+    if background:
+        parts.append(background)
     return "\n\n".join(parts)
 
 

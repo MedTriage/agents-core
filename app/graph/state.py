@@ -10,8 +10,14 @@ class AgentState(TypedDict):
     # Title
     title: Optional[str]
 
-    # Scribe: persistent per-conversation medical state, loaded/updated each turn
+    # Scribe: this conversation's medical record. The server passes the prior record in and
+    # persists what comes back.
     scribe_output: Optional[dict]
+
+    # The patient's account background (stated profile, plus facts from earlier
+    # conversations they have not confirmed), built by the server for every turn. Must be
+    # declared here: LangGraph drops input keys the schema does not name.
+    patient_background: Optional[str]
 
     # Intent (binary: clinical_query | chitchat)
     intent_type: Optional[str]

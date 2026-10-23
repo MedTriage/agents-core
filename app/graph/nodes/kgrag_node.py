@@ -40,7 +40,7 @@ from app.config import (
     SNOMED_MAX_SIBLINGS,
     SNOMED_MAX_SUBTYPES,
 )
-from app.graph.nodes.scribe_node import record_context
+from app.graph.nodes.scribe_node import background_context, record_context
 from app.services import snomed_store
 from app.services.snomed_store import SnomedUnavailable
 from app.services.openai_client import generate_content
@@ -225,6 +225,10 @@ def _build_query_context(state) -> str:
             "=== PATIENT RECORD (accumulated background from earlier turns) ===\n"
             + record
         )
+
+    background = background_context(state)
+    if background:
+        parts.append(background)
 
     hint = (state.get("branch_refinement_hints") or {}).get("kgrag")
     if hint:

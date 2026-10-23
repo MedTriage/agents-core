@@ -42,11 +42,6 @@ MAX_RETRIES = 2
 # back to 1 restores the loop.
 MAX_BRANCH_RETRIES = 0
 
-# Scribe per-conversation state files
-CONVERSATIONS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "data", "conversations"
-)
-
 # Medical MCP server (JamesANZ/medical-mcp, vendored — source only, node_modules and
 # build/ are gitignored). Must be built before the MCP branch works:
 #   cd vendor/medical-mcp && npm install && npm run build
@@ -153,3 +148,42 @@ DST_UNRULED_MIN_PLAUSIBILITY = 0.3
 # until that is measured on real traffic a mismatch would fire the safety clamps for the
 # wrong reason. Measure first, then enforce.
 DST_ENFORCE = False
+
+# --- Accounts, persistence and email ---
+# Postgres (see README for the one-line Podman command). Required: the API stores accounts,
+# profiles, conversations and the review queue, and has nowhere else to put them.
+DATABASE_URL = os.getenv("DATABASE_URL")
+# Where links in emails point. Local by design: the system is not deployed.
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:3000")
+
+# Sessions slide forward with use but never outlive the absolute cap.
+SESSION_IDLE_DAYS = 14
+SESSION_MAX_DAYS = 30
+VERIFY_TOKEN_HOURS = 24
+RESET_TOKEN_HOURS = 1
+INVITE_TOKEN_DAYS = 7
+PASSWORD_MIN_LENGTH = 10
+
+# Login throttling: per email, and a looser per-IP ceiling for spraying across accounts.
+LOGIN_MAX_FAILURES = 5
+LOGIN_MAX_FAILURES_PER_IP = 20
+LOGIN_FAILURE_WINDOW_MINUTES = 15
+
+# A turn is ~9 paid LLM calls against an account capped at 20 requests a minute for every
+# user combined, so one runaway client must not be able to drain either.
+TURNS_PER_HOUR = 30
+# How long a turn may hold its conversation before the busy flag is treated as abandoned.
+TURN_BUSY_MINUTES = 10
+
+# Doctors get at most one "cases waiting" email per window, not one per case.
+DOCTOR_DIGEST_MINUTES = 30
+
+# Gmail SMTP with an app password. Without credentials the outbox keeps queuing and
+# sends nothing; no request ever fails because email is not configured.
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD")
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "MedTriage")
+EMAIL_MAX_ATTEMPTS = 5
+EMAIL_WORKER_ENABLED = os.getenv("EMAIL_WORKER_ENABLED", "1") == "1"

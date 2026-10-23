@@ -7,3 +7,9 @@ tenacity
 openai
 mcp
 langsmith
+sqlalchemy
+alembic
+psycopg[binary]
+argon2-cffi
+jinja2
+email-validator

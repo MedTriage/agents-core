@@ -1,9 +1,8 @@
+import copy
 import json
-import os
 import re
 from app.services.openai_client import generate_content
 from app.services.retry import retry_on_exception
-from app.config import CONVERSATIONS_PATH
 
 SCRIBE_PROMPT = """
 You are the Scribe in a medical triage platform. You maintain a structured, cumulative
@@ -90,19 +89,6 @@ EMPTY_RECORD = {
 
 # Keys the model may write. "turn" is bookkeeping, not clinical content.
 RECORD_KEYS = set(EMPTY_RECORD.keys()) - {"turn"}
-
-# conversation_id lands in a filesystem path, so it must not be able to escape
-# CONVERSATIONS_PATH. Reject anything that is not a plain slug.
-_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-
-
-def _state_path(conversation_id: str) -> str:
-    if not _SAFE_ID.match(conversation_id or ""):
-        raise ValueError(
-            "conversation_id must be 1-64 chars of [A-Za-z0-9_-]"
-        )
-    return os.path.join(CONVERSATIONS_PATH, f"{conversation_id}.json")
-
 
 def _normalize_symptoms(raw) -> list[dict]:
     """Coerce symptoms to the provenance shape, accepting the older flat-string form.
@@ -213,27 +199,32 @@ def record_context(state: dict) -> str | None:
     return format_record(record)
 
 
-def _load_record(path: str) -> dict:
-    if not os.path.exists(path):
-        return dict(EMPTY_RECORD)
-    try:
-        with open(path, "r") as f:
-            stored = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        # A corrupt or unreadable record must not take down the turn.
-        return dict(EMPTY_RECORD)
+BACKGROUND_HEADER = (
+    "=== PATIENT BACKGROUND (from the patient's account: what they stated in their profile, "
+    "and facts from earlier conversations they have not confirmed) ==="
+)
 
-    # Backfill any missing keys so downstream nodes can rely on the shape.
-    record = {**EMPTY_RECORD, **{k: v for k, v in stored.items() if k in RECORD_KEYS}}
+
+def background_context(state: dict) -> str | None:
+    """The account background, or None when the patient has told us nothing.
+
+    Built by the server for every turn, the first included — unlike record_context, which
+    stays silent on turn one because everything in it came from the message itself. Age,
+    gender and allergies are account-level facts that message cannot supply.
+    """
+    background = state.get("patient_background")
+    return f"{BACKGROUND_HEADER}\n{background}" if background else None
+
+
+def _coerce_record(stored) -> dict:
+    """The prior record the server passed in, backfilled so downstream nodes can rely on
+    the shape. None — a conversation's first turn — or anything malformed starts empty."""
+    if not isinstance(stored, dict):
+        return copy.deepcopy(EMPTY_RECORD)
+    record = {**copy.deepcopy(EMPTY_RECORD), **{k: v for k, v in stored.items() if k in RECORD_KEYS}}
     record["turn"] = int(stored.get("turn") or 0)
     record["symptoms"] = _normalize_symptoms(record["symptoms"])
     return record
-
-
-def _write_record(path: str, record: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(record, f, indent=2)
 
 
 @retry_on_exception
@@ -242,17 +233,10 @@ def call_model(prompt: str):
 
 
 def scribe_node(state):
-    conversation_id = state.get("conversation_id", "")
+    """Update this conversation's record from the latest message. The server passes the
+    prior record in as `scribe_output` and persists whatever comes back."""
     user_input = state["user_input"]
-
-    try:
-        path = _state_path(conversation_id)
-    except ValueError as e:
-        # Without a usable id we cannot persist, but the turn can still proceed
-        # against an in-memory empty record.
-        return {"scribe_output": {**EMPTY_RECORD, "error": str(e)}}
-
-    existing = _load_record(path)
+    existing = _coerce_record(state.get("scribe_output"))
     turn = int(existing.get("turn") or 0) + 1
 
     # The model sees symptoms as plain strings and never sees a turn number. Provenance
@@ -291,10 +275,9 @@ def scribe_node(state):
             parsed.get("reported_this_turn"),
         )
 
-        _write_record(path, record)
         return {"scribe_output": record}
 
     except Exception as e:
-        # Never lose the record on a bad turn — fall back to what was already on disk.
+        # Never lose the record on a bad turn — fall back to the record the turn began with.
         # The turn is not advanced: nothing was recorded, so nothing was reported "now".
         return {"scribe_output": {**existing, "error": str(e)}}

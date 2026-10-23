@@ -208,8 +208,6 @@ __marimo__/
 
 # CLAUDE.MD
 CLAUDE.md
-# Scribe per-conversation state (runtime artifacts)
-data/conversations/
 docs/
 # SNOMED CT knowledge graph (built by app/rag/snomed_ingest.py)
 data/snomed.db

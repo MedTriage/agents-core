@@ -1,0 +1,5 @@
+Hi {{ name }},
+
+A doctor has looked at one of your questions on MedTriage. Sign in to read their response:
+
+{{ link }}

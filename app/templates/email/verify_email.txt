@@ -1,0 +1,7 @@
+Hi {{ name }},
+
+Confirm this address to finish setting up your MedTriage account. The link works once and expires in 24 hours:
+
+{{ link }}
+
+MedTriage is a research demo, not a medical service.

@@ -2,6 +2,7 @@ import json
 from app.services.openai_client import generate_content
 from app.services.retry import retry_on_exception
 from app.config import MAX_BRANCH_RETRIES
+from app.graph.nodes.scribe_node import background_context
 
 # Branches the orchestrator fans in from. Kept in one place so routing, retry
 # accounting, and prompt construction cannot drift apart.
@@ -369,6 +370,11 @@ def call_model(prompt: str):
     return generate_content(prompt)
 
 
+def _background_section(state) -> str:
+    background = background_context(state)
+    return f"\n\n{background}" if background else ""
+
+
 # Per-branch cap on raw evidence shown to the orchestrator. KGRAG subgraphs and MCP tool
 # dumps are unbounded in principle; a turn already costs ~50k tokens on long narratives.
 BRANCH_CONTEXT_CHARS = 4000
@@ -588,6 +594,7 @@ def _handle_no_evidence(state) -> dict:
         NO_EVIDENCE_PROMPT
         + "\n\n=== SCRIBE RECORD (patient's cumulative medical state) ===\n"
         + json.dumps(state.get("scribe_output") or {}, indent=2)
+        + _background_section(state)
         + "\n\n=== CONVERSATION HISTORY ===\n"
         + json.dumps(state.get("chat_history") or [], indent=2)
         + "\n\n=== ORIGINAL USER QUERY ===\n"
@@ -816,6 +823,7 @@ def _handle_clinical(state) -> dict:
         ORCHESTRATOR_PROMPT
         + "\n\n=== SCRIBE RECORD (patient's cumulative medical state) ===\n"
         + json.dumps(state.get("scribe_output") or {}, indent=2)
+        + _background_section(state)
         + "\n\n=== AGENT OUTPUTS ===\n"
         + agent_sections
         + (

@@ -9,6 +9,7 @@ tool's raw text output into the shared branch-output shape.
 import json
 
 from app.services import mcp_client
+from app.graph.nodes.scribe_node import background_context
 from app.services.openai_client import generate_content
 from app.services.retry import retry_on_exception
 
@@ -117,6 +118,10 @@ def _build_query_context(state) -> str:
         "=== PATIENT RECORD ===\n"
         + json.dumps(state.get("scribe_output") or {}, indent=2)
     ]
+
+    background = background_context(state)
+    if background:
+        parts.append(background)
 
     chat_history = state.get("chat_history") or []
     if chat_history:
