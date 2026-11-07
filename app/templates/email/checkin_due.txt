@@ -1,0 +1,7 @@
+Hi {{ name }},
+
+{% if reminder is defined and reminder %}Your check-in is still waiting.{% else %}Time for a quick check-in.{% endif %} How are you feeling? Answering takes under a minute and tells us whether anything has changed:
+
+{{ link }}
+
+If any of the warning signs we gave you have appeared, don't wait for this check-in: get medical help now.

@@ -8,7 +8,8 @@ from app.db.session import engine
 from app.services import mailer
 from tests.conftest import outbox, signup
 
-LINKED = ["verify_email", "password_reset", "doctor_invite", "case_reviewed", "cases_waiting"]
+LINKED = ["verify_email", "password_reset", "doctor_invite", "case_reviewed", "cases_waiting",
+          "checkin_due", "followup_unanswered"]
 UNLINKED = ["password_changed", "account_deleted"]
 LINK = "http://localhost:3000/x?token=abc123"
 
@@ -57,6 +58,13 @@ def test_each_email_has_its_own_subject():
     subjects = {mailer.build_message("a@b.co", t, {"name": "P", "link": LINK})["Subject"]
                 for t in LINKED + UNLINKED}
     assert len(subjects) == len(LINKED + UNLINKED)
+
+
+def test_a_check_in_reminder_says_it_is_a_reminder():
+    first = mailer.build_message("pat@example.com", "checkin_due", {"name": "Pat", "link": LINK, "reminder": False})
+    again = mailer.build_message("pat@example.com", "checkin_due", {"name": "Pat", "link": LINK, "reminder": True})
+    assert "reminder" not in first["Subject"].lower()
+    assert "reminder" in again["Subject"].lower()
 
 
 def test_a_name_cannot_inject_html_into_an_email():

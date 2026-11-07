@@ -187,3 +187,26 @@ SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD")
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "MedTriage")
 EMAIL_MAX_ATTEMPTS = 5
 EMAIL_WORKER_ENABLED = os.getenv("EMAIL_WORKER_ENABLED", "1") == "1"
+
+# --- Follow-up (check-ins after an answer) ---
+# THE DEMO TOGGLE. Unset or 0: check-ins follow NICE's timing in days, with a night-time
+# pause. A number of seconds: every wait (each check-in, the reminder, the lapse) takes
+# that long instead and the night pause is skipped, so the whole flow plays out in minutes.
+FOLLOWUP_DEMO_SECONDS = int(os.getenv("FOLLOWUP_DEMO_SECONDS", "0"))
+# Silence: one reminder this long after a check-in opens, then lapsed this long after that.
+FOLLOWUP_REMINDER_HOURS = 24
+FOLLOWUP_LAPSE_HOURS = 24
+# Nothing is sent between these local hours; it waits for the morning.
+FOLLOWUP_QUIET_HOURS = (22, 8)
+FOLLOWUP_TIMEZONE = "Asia/Kolkata"
+FOLLOWUP_WORKER_ENABLED = os.getenv("FOLLOWUP_WORKER_ENABLED", "1") == "1"
+# Below this probability Jev's choice of complaint is not trusted, and the episode follows
+# the general plan. A guess, not measured: tune it on labelled wordings before relying on it.
+FOLLOWUP_JEV_MIN_PROBABILITY = 0.8
+
+# --- Jev (TypeSafe's decision model), through OpenRouter's decisions endpoint ---
+# The endpoint is alpha. Pinned to a version rather than ~typesafe/jev-latest, so its
+# behaviour cannot change underneath us. Billed on input tokens only.
+JEV_URL = "https://openrouter.ai/api/alpha/decisions"
+JEV_MODEL = "typesafe/jev-1.13"
+JEV_TIMEOUT_SECONDS = 5

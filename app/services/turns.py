@@ -13,13 +13,14 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.config import APP_BASE_URL, DOCTOR_DIGEST_MINUTES, TURN_BUSY_MINUTES, TURNS_PER_HOUR
-from app.db.models import Conversation, EmailOutbox, Message, Profile, ReviewCase, User
+from app.config import TURN_BUSY_MINUTES, TURNS_PER_HOUR
+from app.db.models import Conversation, Message, Profile, User
 from app.db.session import SessionLocal
 from app.graph.nodes.scribe_node import RECORD_KEYS
+from app.services import followup
 from app.services.explain import build_explanation
-from app.services.outbox import enqueue
 from app.services.patient_context import build_background, sync_record
+from app.services.review import open_case
 
 log = logging.getLogger(__name__)
 
@@ -144,29 +145,28 @@ def _clean_scribe_record(record) -> dict | None:
     return {k: v for k, v in record.items() if k in RECORD_KEYS or k == "turn"}
 
 
-def _notify_doctors(db: Session) -> None:
-    """At most one "cases waiting" email per doctor per window, however many cases arrive."""
-    since = _now() - timedelta(minutes=DOCTOR_DIGEST_MINUTES)
-    doctors = db.scalars(select(User).where(
-        User.role == "doctor", User.email_verified_at.is_not(None), User.password_hash.is_not(None)))
-    for doctor in doctors:
-        recently = db.scalar(select(EmailOutbox.id).where(
-            EmailOutbox.recipient == doctor.email, EmailOutbox.template == "cases_waiting",
-            EmailOutbox.created_at > since))
-        if recently is None:
-            enqueue(db, doctor.email, "cases_waiting", name=doctor.name, link=f"{APP_BASE_URL}/doctor")
-
-
 def finish_turn(turn: Turn, result: dict) -> dict:
     """Persist a completed turn and return the payload the client receives."""
     state = turn.state
     level = _triage_level(result)
     response = result.get("orchestrator_response") or (result.get("orchestrator_output") or {}).get("response") or ""
-    explanation = build_explanation(result)
     record = _clean_scribe_record(result.get("scribe_output"))
 
     with SessionLocal() as db:
         conversation = db.get(Conversation, _parse_id(state["conversation_id"]))
+
+        # A "worse" check-in raises this turn to at least level_2. Raised here, after the
+        # guardian, so it can only add care; the explanation is built from the raised level.
+        raised = followup.floor_for_retriage(db, conversation.id, level)
+        if raised != level:
+            level = raised
+            guardian = dict(result.get("guardian_output") or {})
+            guardian["triage_level"] = level
+            guardian["reasoning"] = (guardian.get("reasoning") or "") + (
+                " (raised to level_2: the patient reported getting worse at a follow-up check-in)")
+            result = {**result, "guardian_output": guardian, "triage_level": level}
+        explanation = build_explanation(result)
+
         db.add(Message(conversation_id=conversation.id, role="user", content=state["user_input"]))
         assistant = Message(
             conversation_id=conversation.id, role="assistant", content=response, triage_level=level,
@@ -181,18 +181,14 @@ def finish_turn(turn: Turn, result: dict) -> dict:
         conversation.title = conversation.title or (result.get("title") or None)
 
         if level == "level_2":
-            db.add(ReviewCase(
-                message_id=assistant.id, conversation_id=conversation.id, patient_id=conversation.user_id,
-                context_snapshot={
-                    "background": state.get("patient_background"),
-                    "profile_updated_at": (turn.profile_updated_at.isoformat()
-                                           if turn.profile_updated_at else None),
-                },
-            ))
-            _notify_doctors(db)
+            open_case(db, assistant, conversation.user_id, state.get("patient_background"),
+                      turn.profile_updated_at)
         elif level == "level_3":
             conversation.locked = True
 
+        episode = followup.after_turn(db, conversation, assistant, level,
+                                      {**result, "user_input": state["user_input"]})
+        watched = followup.episode_out(db, episode)
         conversation.busy_until = None
         db.commit()
         message_id = assistant.id
@@ -203,4 +199,5 @@ def finish_turn(turn: Turn, result: dict) -> dict:
         "explanation": explanation,
         "conversation_id": state["conversation_id"],
         "message_id": message_id,
+        "followup": watched,
     }

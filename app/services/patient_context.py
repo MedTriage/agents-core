@@ -16,7 +16,8 @@ from datetime import date, datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Profile, RecordItem
+from app.db.models import Checkin, Episode, Profile, RecordItem
+from app.services.followup_content import COMPLAINTS, OVERALL_WORDS
 
 # Scribe record field → record kind. Symptoms, demographics and notes are deliberately
 # not carried: last week's cold must not shape today's diagnosis, and age and gender
@@ -122,13 +123,32 @@ def _unconfirmed_lines(db: Session, user_id, conversation_id) -> list[str]:
     ]
 
 
+def _followup_lines(db: Session, conversation_id) -> list[str]:
+    """When a follow-up check-in sent this conversation back through triage: what was being
+    watched, and what the patient said at the check-in."""
+    episode = db.scalar(select(Episode).where(
+        Episode.conversation_id == conversation_id, Episode.state == "active",
+        Episode.awaiting_retriage.is_(True)))
+    if episode is None:
+        return []
+    checkin = db.scalar(select(Checkin).where(Checkin.episode_id == episode.id, Checkin.answered_at.is_not(None))
+                        .order_by(Checkin.answered_at.desc()).limit(1))
+    lines = ["Follow-up of this conversation:",
+             f"- Watched since {episode.opened_at.date().isoformat()} for: "
+             f"{COMPLAINTS[episode.complaint].label.lower()}"]
+    if episode.usual_course:
+        lines.append(f"- Usual course: {episode.usual_course}")
+    if checkin is not None:
+        added = f", and added: {checkin.new_text}" if checkin.new_text else ""
+        lines.append(f"- At the check-in on {checkin.answered_at.date().isoformat()} the patient said it is "
+                     f"{OVERALL_WORDS[checkin.overall]}{added}.")
+    return lines
+
+
 def build_background(db: Session, user_id, conversation_id) -> str | None:
     """The PATIENT BACKGROUND block for every turn, first turn included. None when
     nothing is known, so prompts carry no empty section."""
     uid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
-    lines = _profile_lines(db.get(Profile, uid))
-    unconfirmed = _unconfirmed_lines(db, uid, conversation_id)
-    if lines and unconfirmed:
-        lines.append("")
-    lines += unconfirmed
-    return "\n".join(lines) or None
+    sections = [_profile_lines(db.get(Profile, uid)), _unconfirmed_lines(db, uid, conversation_id),
+                _followup_lines(db, conversation_id)]
+    return "\n\n".join("\n".join(s) for s in sections if s) or None

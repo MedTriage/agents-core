@@ -107,6 +107,10 @@ Later, `podman start medtriage-db` brings it back. To remove the database and al
 podman rm -f medtriage-db && podman volume rm medtriage-pgdata && podman rmi postgres:17-alpine
 ```
 
+### Follow-up demo mode
+
+After a self-care answer, MedTriage schedules check-ins days apart, following NICE's usual illness durations. To watch the whole flow in a minute, set `FOLLOWUP_DEMO_SECONDS=20` in `.env` and restart the API: every check-in, reminder and timeout then waits 20 seconds instead, at any time of day.
+
 ### Doctor accounts
 
 Doctors are invited from the command line; there is no public doctor sign-up. The invitation email is sent by the running API.

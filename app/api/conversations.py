@@ -3,8 +3,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_patient
-from app.db.models import Conversation, Message, ReviewCase, User
+from app.db.models import Checkin, Conversation, Episode, Message, ReviewCase, User
 from app.db.session import get_db
+from app.services import followup
 from app.services.turns import TurnRefused, own_conversation
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -51,10 +52,14 @@ def list_conversations(user: User = Depends(require_patient), db: Session = Depe
         .where(Conversation.user_id == user.id)
         .order_by(Conversation.updated_at.desc())
     ).all()
+    due = set(db.scalars(
+        select(Episode.conversation_id).join(Checkin, Checkin.episode_id == Episode.id)
+        .where(Episode.user_id == user.id, Episode.state == "active", Checkin.outcome.is_(None))
+    ))
     return [
         {"id": str(c.id), "title": c.title, "locked": c.locked,
          "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat(),
-         "message_count": n or 0, "highest_triage_level": highest}
+         "message_count": n or 0, "highest_triage_level": highest, "checkin_due": c.id in due}
         for c, n, highest in rows
     ]
 
@@ -72,6 +77,7 @@ def get_conversation(conversation_id: str, user: User = Depends(require_patient)
         "title": conversation.title,
         "locked": conversation.locked,
         "messages": [message_out(m, cases.get(m.id)) for m in messages],
+        "followup": followup.episode_out(db, followup.latest_episode(db, conversation.id)),
     }
 
 

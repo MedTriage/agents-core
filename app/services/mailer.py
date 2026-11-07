@@ -40,6 +40,8 @@ SUBJECTS = {
     "case_reviewed": "A doctor has reviewed your question",
     "cases_waiting": "Cases are waiting for review on MedTriage",
     "account_deleted": "Your MedTriage account has been deleted",
+    "checkin_due": "Time for a quick check-in on MedTriage",
+    "followup_unanswered": "A patient hasn't answered their check-in",
 }
 
 
@@ -49,7 +51,7 @@ def build_message(recipient: str, template: str, payload: dict) -> EmailMessage:
     text = _env.get_template(f"{template}.txt").render(**payload)
 
     message = EmailMessage()
-    message["Subject"] = SUBJECTS[template]
+    message["Subject"] = ("Reminder: " if payload.get("reminder") else "") + SUBJECTS[template]
     message["From"] = formataddr((EMAIL_FROM_NAME, SMTP_USER or "medtriage@localhost"))
     message["To"] = recipient
     message.set_content(text)

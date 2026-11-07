@@ -1,0 +1,5 @@
+Hi {{ name }},
+
+A patient whose case you approved hasn't answered their follow-up check-in or its reminder. They are listed under unanswered follow-ups in your review queue:
+
+{{ link }}

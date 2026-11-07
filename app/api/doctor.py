@@ -16,6 +16,7 @@ from app.api.me import profile_out
 from app.config import APP_BASE_URL
 from app.db.models import AccessLog, Conversation, Message, Profile, ReviewCase, User
 from app.db.session import get_db
+from app.services import followup
 from app.services.outbox import enqueue
 
 router = APIRouter(prefix="/doctor", tags=["doctor"])
@@ -118,6 +119,15 @@ def review_case(case_id: str, body: ReviewIn, doctor: User = Depends(require_doc
     case.doctor_id = doctor.id
     case.reviewed_at = datetime.now(timezone.utc)
     _log(db, doctor, "review_case", case)
+
+    # An approved triage answer is followed up like a level_1 one. A case raised by a
+    # follow-up check-in is not: the doctor has taken that illness over.
+    message = db.get(Message, case.message_id)
+    conversation = db.get(Conversation, case.conversation_id)
+    if body.status == "verified" and message.pipeline and not conversation.locked:
+        diagnosis = (message.pipeline.get("orchestrator_output") or {}).get("probable_diagnosis")
+        followup.open_episode(db, conversation, message, "level_2", diagnosis,
+                              reviewing_doctor_id=doctor.id)
 
     patient = db.get(User, case.patient_id)
     # Says only that a review happened. The decision and the notes are read after

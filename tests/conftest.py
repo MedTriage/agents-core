@@ -1,8 +1,8 @@
 """Test harness: a real Postgres test database, the real FastAPI app, a fake triage graph.
 
-The graph is the only thing faked. It is the slow, paid, external part (nine LLM calls a
-turn), and everything these tests protect — who may read what, what gets persisted, what
-an email may contain — sits around it, not inside it.
+The graph and Jev are the only things faked. They are the external, paid parts (nine LLM
+calls a turn, one Jev call an episode), and everything these tests protect — who may read
+what, what gets persisted, what an email may contain — sits around them, not inside them.
 """
 import os
 import re
@@ -17,6 +17,8 @@ if not _base_url:
     raise RuntimeError("DATABASE_URL is not set; see README for starting the database")
 os.environ["DATABASE_URL"] = re.sub(r"/[^/]+$", "/medtriage_test", _base_url)
 os.environ["EMAIL_WORKER_ENABLED"] = "0"
+os.environ["FOLLOWUP_WORKER_ENABLED"] = "0"
+os.environ["FOLLOWUP_DEMO_SECONDS"] = "0"  # real NICE timing in tests, whatever .env says
 # Safety net: a test that accidentally reaches the real graph must fail, not spend money.
 # load_dotenv() never overrides a variable that is already set.
 os.environ["OPENROUTER_API_KEY"] = "test-key-no-network"
@@ -29,6 +31,7 @@ from sqlalchemy import text  # noqa: E402
 
 from app.db.session import SessionLocal, engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.services import jev as jev_service  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -64,6 +67,9 @@ class FakeGraph:
         self.response = "Rest and drink fluids."
         self.scribe_record = None
         self.title = "Sore Throat"
+        self.diagnosis = "Common cold"
+        self.intent = "clinical_query"
+        self.clarification = False
 
     def _result(self, state):
         record = self.scribe_record or {
@@ -73,21 +79,21 @@ class FakeGraph:
         return {
             **state,
             "title": self.title,
-            "intent_type": "clinical_query",
+            "intent_type": self.intent,
             "intent_confidence": 0.9,
             "scribe_output": record,
-            "parametric_output": {"probable_diagnosis": "Common cold", "differentials": [],
+            "parametric_output": {"probable_diagnosis": self.diagnosis, "differentials": [],
                                   "recommended_actions": [], "citations": [], "confidence": 0.8},
             "kgrag_output": None,
             "mcp_output": None,
             "dst_output": None,
             "orchestrator_output": {"response": self.response, "decision": "approve",
                                     "safety_risk": "low", "confidence_adjusted": 0.8,
-                                    "probable_diagnosis": "Common cold", "differentials": []},
+                                    "probable_diagnosis": self.diagnosis, "differentials": []},
             "orchestrator_decision": "approve",
             "orchestrator_response": self.response,
             "is_emergency": self.level == "level_3",
-            "is_clarification": False,
+            "is_clarification": self.clarification,
             "guardian_output": {"triage_level": self.level, "reasoning": "test",
                                 "requires_doctor": self.level != "level_1",
                                 "ai_lock": self.level == "level_3"},
@@ -112,6 +118,28 @@ class FakeGraph:
 @pytest.fixture
 def graph():
     return FakeGraph()
+
+
+class FakeJev:
+    """Stands in for Jev. Unreachable unless a test gives it probabilities, so by default the
+    word list names the complaint, and no test reaches the network."""
+
+    def __init__(self):
+        self.calls = []
+        self.probabilities = None
+
+    def choose(self, state, instructions, criteria):
+        self.calls.append({"state": state, "instructions": instructions, "criteria": criteria})
+        if self.probabilities is None:
+            raise ConnectionError("Jev is not reachable in tests")
+        return self.probabilities
+
+
+@pytest.fixture(autouse=True)
+def jev(monkeypatch):
+    fake = FakeJev()
+    monkeypatch.setattr(jev_service, "choose", fake.choose)
+    return fake
 
 
 @pytest.fixture

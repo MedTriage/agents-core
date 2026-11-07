@@ -200,3 +200,57 @@ class EmailOutbox(Base):
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+EPISODE_STATES = ("active", "resolved", "escalated", "lapsed", "stopped")
+CHECKIN_ANSWERS = ("better", "same", "worse")
+
+
+class Episode(Base):
+    """One illness in one person, watched over days after a level_1 answer (or a level_2
+    answer a doctor approved). Only `resolved` means the patient said it got better: a
+    `lapsed` episode is one nobody heard back from, and is never counted as recovered."""
+    __tablename__ = "episodes"
+    __table_args__ = (CheckConstraint(_in("state", EPISODE_STATES), name="state_valid"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    opened_message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"))
+    opened_level: Mapped[str] = mapped_column(String(16))
+    # The doctor who approved a level_2 answer; told if the patient goes silent.
+    reviewing_doctor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    complaint: Mapped[str] = mapped_column(String(32))
+    usual_course: Mapped[str | None] = mapped_column(String(120))
+    # Each {"text", "level"}; fixed when the episode opens, so a check-in asks about exactly
+    # what the patient was told to watch for.
+    return_signs: Mapped[list] = mapped_column(JSONB)
+    checkin_days: Mapped[list] = mapped_column(JSONB)
+    checkins_done: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    state: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    next_checkin_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    # Set by a "worse" check-in: the next turn in this conversation is floored at level_2.
+    awaiting_retriage: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Checkin(Base):
+    __tablename__ = "checkins"
+    __table_args__ = (
+        CheckConstraint(f"overall IS NULL OR {_in('overall', CHECKIN_ANSWERS)}", name="overall_valid"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    episode_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("episodes.id", ondelete="CASCADE"), index=True)
+    number: Mapped[int] = mapped_column(Integer)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    overall: Mapped[str | None] = mapped_column(String(8))
+    signs_present: Mapped[list | None] = mapped_column(JSONB)
+    new_text: Mapped[str | None] = mapped_column(Text)
+    # resolved | scheduled | doctor | urgent | retriage | reassess | lapsed | postponed | stopped
+    outcome: Mapped[str | None] = mapped_column(String(16))
