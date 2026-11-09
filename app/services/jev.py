@@ -9,15 +9,24 @@ import httpx
 from app.config import JEV_MODEL, JEV_TIMEOUT_SECONDS, JEV_URL, OPENROUTER_API_KEY
 
 
-def choose(state: dict, instructions: str, criteria: dict[str, str]) -> dict[str, float]:
-    """Ask one choice question about `state`; return each option's probability."""
+def _answers(state: dict, questions: dict) -> dict:
     response = httpx.post(
         JEV_URL,
-        json={"model": JEV_MODEL, "state": state,
-              "questions": {"complaint": {"type": "choice", "instructions": instructions,
-                                          "criteria": criteria}}},
+        json={"model": JEV_MODEL, "state": state, "questions": questions},
         headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
         timeout=JEV_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
-    return response.json()["answers"]["complaint"]["probabilities"]
+    return response.json()["answers"]
+
+
+def decide(state: dict, questions: dict) -> dict:
+    """Ask several questions about `state` in one call. Jev answers them in parallel, none
+    seeing the others' answers; returns its answers, keyed as `questions` was."""
+    return _answers(state, questions)
+
+
+def choose(state: dict, instructions: str, criteria: dict[str, str]) -> dict[str, float]:
+    """Ask one choice question about `state`; return each option's probability."""
+    question = {"type": "choice", "instructions": instructions, "criteria": criteria}
+    return _answers(state, {"complaint": question})["complaint"]["probabilities"]

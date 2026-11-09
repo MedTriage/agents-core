@@ -33,6 +33,7 @@ def message_out(message: Message, case: ReviewCase | None = None) -> dict:
         "triage_level": message.triage_level,
         "explanation": message.explanation,
         "pipeline": message.pipeline,
+        "child": message.child,
         "created_at": message.created_at.isoformat(),
         "review": review_out(case),
     }
@@ -57,7 +58,7 @@ def list_conversations(user: User = Depends(require_patient), db: Session = Depe
         .where(Episode.user_id == user.id, Episode.state == "active", Checkin.outcome.is_(None))
     ))
     return [
-        {"id": str(c.id), "title": c.title, "locked": c.locked,
+        {"id": str(c.id), "title": c.title, "locked": c.locked, "mode": c.mode,
          "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat(),
          "message_count": n or 0, "highest_triage_level": highest, "checkin_due": c.id in due}
         for c, n, highest in rows
@@ -76,6 +77,7 @@ def get_conversation(conversation_id: str, user: User = Depends(require_patient)
         "id": str(conversation.id),
         "title": conversation.title,
         "locked": conversation.locked,
+        "mode": conversation.mode,
         "messages": [message_out(m, cases.get(m.id)) for m in messages],
         "followup": followup.episode_out(db, followup.latest_episode(db, conversation.id)),
     }

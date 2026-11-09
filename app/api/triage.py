@@ -5,6 +5,7 @@ import json
 import logging
 import queue
 import threading
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -34,13 +35,22 @@ _FAILED = "The assessment could not be completed. Please try again."
 class TurnIn(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     conversation_id: str | None = None
+    # Only read for a new conversation; an existing one keeps the mode it started with.
+    mode: Literal["triage", "child"] = "triage"
 
 
 def _start(db: Session, user: User, body: TurnIn) -> turns.Turn:
     try:
-        return turns.prepare_turn(db, user, body.conversation_id, body.text)
+        return turns.prepare_turn(db, user, body.conversation_id, body.text, body.mode)
     except turns.TurnRefused as refused:
         raise HTTPException(refused.status, refused.detail)
+
+
+def _pipeline(request: Request, turn: turns.Turn):
+    """The graph to run and the function that saves its result, by the conversation's mode."""
+    if turn.mode == "child":
+        return request.app.state.child_graph, turns.finish_child_turn
+    return request.app.state.graph, turns.finish_turn
 
 
 @router.post("/process")
@@ -48,9 +58,10 @@ def process_input(body: TurnIn, request: Request, user: User = Depends(require_v
                   db: Session = Depends(get_db)):
     turn = _start(db, user, body)
     conversation_id = turn.state["conversation_id"]
+    graph, finish = _pipeline(request, turn)
     try:
-        result = request.app.state.graph.invoke(turn.state)
-        return turns.finish_turn(turn, result)
+        result = graph.invoke(turn.state)
+        return finish(turn, result)
     except Exception:
         log.exception("triage turn failed (conversation %s)", conversation_id)
         turns.release(conversation_id)
@@ -64,7 +75,7 @@ def _progress_event(node: str, accumulated: dict) -> dict | None:
     them names a component: that their message was read, that a source finished, and
     that the sources were weighed against each other.
     """
-    if node == "scribe_node":
+    if node in ("scribe_node", "child_signs_node"):
         return {"type": "stage", "stage": "reading"}
 
     if node in _BRANCH_NODES:
@@ -111,7 +122,7 @@ def process_stream(body: TurnIn, request: Request, user: User = Depends(require_
     """
     turn = _start(db, user, body)
     state = turn.state
-    graph = request.app.state.graph
+    graph, finish = _pipeline(request, turn)
     events: queue.Queue = queue.Queue()
 
     def run():
@@ -124,7 +135,7 @@ def process_stream(body: TurnIn, request: Request, user: User = Depends(require_
                     event = _progress_event(node, accumulated)
                     if event:
                         events.put(event)
-            events.put({"type": "done", **turns.finish_turn(turn, accumulated)})
+            events.put({"type": "done", **finish(turn, accumulated)})
         except Exception:
             log.exception("streamed triage turn failed (conversation %s)", state["conversation_id"])
             turns.release(state["conversation_id"])

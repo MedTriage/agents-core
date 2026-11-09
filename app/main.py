@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.api import auth, conversations, doctor, followups, me, triage
 from app.config import EMAIL_WORKER_ENABLED, FOLLOWUP_WORKER_ENABLED
 from app.graph.builder import build_graph
+from app.graph.child_builder import build_child_graph
 from app.services import followup
 from app.services.mailer import start_worker
 
@@ -35,6 +36,8 @@ app.include_router(followups.router)
 # Held on the app so tests can swap in a fake: the graph is the one slow, paid,
 # external dependency, and everything around it is what the tests protect.
 app.state.graph = build_graph()
+# Child-health mode's own graph (Q&A from IMNCI/WHO documents, no triage); faked the same way.
+app.state.child_graph = build_child_graph()
 
 
 # Home route

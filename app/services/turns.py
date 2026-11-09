@@ -18,6 +18,7 @@ from app.db.models import Conversation, Message, Profile, User
 from app.db.session import SessionLocal
 from app.graph.nodes.scribe_node import RECORD_KEYS
 from app.services import followup
+from app.services.child_health_content import compose
 from app.services.explain import build_explanation
 from app.services.patient_context import build_background, sync_record
 from app.services.review import open_case
@@ -38,6 +39,7 @@ class Turn:
     about the moment the background was built."""
     state: dict
     profile_updated_at: datetime | None
+    mode: str = "triage"
 
 
 class TurnRefused(Exception):
@@ -66,8 +68,9 @@ def own_conversation(db: Session, user: User, conversation_id) -> Conversation:
     return conversation
 
 
-def prepare_turn(db: Session, user: User, conversation_id, text: str) -> Turn:
-    """Check the turn may run, claim the conversation, and build the graph's input state."""
+def prepare_turn(db: Session, user: User, conversation_id, text: str, mode: str = "triage") -> Turn:
+    """Check the turn may run, claim the conversation, and build the graph's input state.
+    `mode` applies only to a new conversation; an existing one keeps its own."""
     hour_ago = _now() - timedelta(hours=1)
     recent = db.scalar(
         select(func.count()).select_from(Message)
@@ -82,7 +85,7 @@ def prepare_turn(db: Session, user: User, conversation_id, text: str) -> Turn:
         if conversation.locked:
             raise TurnRefused(423, "This conversation was escalated and is closed.")
     else:
-        conversation = Conversation(user_id=user.id)
+        conversation = Conversation(user_id=user.id, mode=mode)
         db.add(conversation)
         db.flush()
 
@@ -104,6 +107,11 @@ def prepare_turn(db: Session, user: User, conversation_id, text: str) -> Turn:
         for m in db.scalars(select(Message).where(Message.conversation_id == conversation.id)
                             .order_by(Message.id))
     ]
+    if conversation.mode == "child":
+        # No profile background: it describes the account holder, not the child asked about.
+        state = {"conversation_id": str(conversation.id), "user_input": text, "chat_history": history}
+        db.commit()
+        return Turn(state=state, profile_updated_at=None, mode="child")
     profile = db.get(Profile, user.id)
     state = {
         "conversation_id": str(conversation.id),
@@ -200,4 +208,43 @@ def finish_turn(turn: Turn, result: dict) -> dict:
         "conversation_id": state["conversation_id"],
         "message_id": message_id,
         "followup": watched,
+    }
+
+
+def _title(text: str) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= 60 else text[:59].rstrip() + "…"
+
+
+def finish_child_turn(turn: Turn, result: dict) -> dict:
+    """Persist a child-mode turn. No triage level, review case, lock, follow-up or record:
+    child mode answers questions, and its record would describe the child, not the account
+    holder whose profile the scribe's items feed."""
+    state = turn.state
+    signs = result.get("child_signs") or {"checked": False, "age_band": "not_stated", "present": []}
+    composed = compose(signs, result.get("child_answer") or {}, result.get("child_passages") or [])
+
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, _parse_id(state["conversation_id"]))
+        db.add(Message(conversation_id=conversation.id, role="user", content=state["user_input"]))
+        assistant = Message(
+            conversation_id=conversation.id, role="assistant", content=composed["response"],
+            child=composed["child"],
+            pipeline={k: result.get(k) for k in ("child_signs", "child_answer", "child_error")},
+        )
+        db.add(assistant)
+        conversation.title = conversation.title or _title(state["user_input"])
+        conversation.busy_until = None
+        db.commit()
+        message_id, title = assistant.id, conversation.title
+
+    return {
+        "mode": "child",
+        "conversation_id": state["conversation_id"],
+        "message_id": message_id,
+        "title": title,
+        "response": composed["response"],
+        "child": composed["child"],
+        "triage_level": None,
+        "followup": None,
     }

@@ -13,3 +13,6 @@ psycopg[binary]
 argon2-cffi
 jinja2
 email-validator
+faiss-cpu
+fastembed
+pypdf

@@ -214,3 +214,7 @@ data/snomed.db
 # Source ontology releases. SNOMED CT's Affiliate Licence permits use, not
 # redistribution — the RF2 release must never be committed.
 data/ontology/
+# Child-health mode: the IMNCI/WHO PDFs you supply, and the index built from them
+# (app/rag/child_ingest.py). Their licences have not been checked for redistribution.
+data/child_docs/
+data/child_index/

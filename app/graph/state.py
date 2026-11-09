@@ -1,6 +1,18 @@
 # Shared data structures for agent state management
 from typing import TypedDict, Optional
 
+
+class ChildState(TypedDict):
+    """Child-health mode's graph (child_builder.py). Its own schema, so nothing here touches
+    the triage graph; every key must still be declared, or LangGraph drops it."""
+    conversation_id: str
+    user_input: str
+    chat_history: Optional[list]
+    child_signs: Optional[dict]  # {"checked", "age_band", "present": [sign keys]}
+    child_passages: Optional[list]  # [{"id", "source", "page", "text", "score"}]
+    child_error: Optional[str]  # why there are no passages, when the index is missing
+    child_answer: Optional[dict]
+
 class AgentState(TypedDict):
     # Per-turn input
     conversation_id: str

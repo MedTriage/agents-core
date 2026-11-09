@@ -111,6 +111,17 @@ podman rm -f medtriage-db && podman volume rm medtriage-pgdata && podman rmi pos
 
 After a self-care answer, MedTriage schedules check-ins days apart, following NICE's usual illness durations. To watch the whole flow in a minute, set `FOLLOWUP_DEMO_SECONDS=20` in `.env` and restart the API: every check-in, reminder and timeout then waits 20 seconds instead, at any time of day.
 
+### Child-health mode
+
+The chat's **Child health** button answers questions about a child from WHO and IMNCI guidelines. It does no triage. A WHO danger sign puts "go to the nearest hospital now" before the answer, and every answer ends with the signs that mean going straight to hospital. The mode needs the guidelines indexed first:
+
+```bash
+# Put the PDFs in data/child_docs/ yourself, after checking each one's copyright page
+python -m app.rag.child_ingest data/child_docs
+```
+
+This builds `data/child_index/` with a local English embedding model (downloaded once, about 67 MB). The documents and the index are gitignored. Without the index the mode still answers, but only from general knowledge, which is labelled as such.
+
 ### Doctor accounts
 
 Doctors are invited from the command line; there is no public doctor sign-up. The invitation email is sent by the running API.

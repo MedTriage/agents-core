@@ -16,6 +16,8 @@ TOKEN_PURPOSES = ("verify", "reset", "invite")
 RECORD_KINDS = ("condition", "medication", "allergy")
 RECORD_STATUSES = ("inferred", "suggested", "accepted", "dismissed")
 CASE_STATUSES = ("pending", "verified", "rejected")
+# triage: the full pipeline. child: Q&A from IMNCI/WHO documents, with no triage level.
+CONVERSATION_MODES = ("triage", "child")
 
 
 def _in(column: str, values) -> str:
@@ -96,6 +98,7 @@ class Profile(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (CheckConstraint(_in("mode", CONVERSATION_MODES), name="mode_valid"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -110,6 +113,8 @@ class Conversation(Base):
     busy_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The scribe's per-conversation record, in exactly the shape the scribe node uses.
     scribe_record: Mapped[dict | None] = mapped_column(JSONB)
+    # Fixed by the first turn; a later turn cannot switch it.
+    mode: Mapped[str] = mapped_column(String(16), default="triage", server_default="triage")
 
 
 class Message(Base):
@@ -126,6 +131,8 @@ class Message(Base):
     # Patient-safe explanation (explain.py) and the doctor-facing audit data.
     explanation: Mapped[dict | None] = mapped_column(JSONB)
     pipeline: Mapped[dict | None] = mapped_column(JSONB)
+    # Child mode only: what the client renders around the answer (child_health_content.compose).
+    child: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -120,13 +120,48 @@ def graph():
     return FakeGraph()
 
 
+class FakeChildGraph:
+    """Stands in for child mode's graph. Returns what its nodes would; what the parent then
+    sees is built by the real code around it."""
+
+    def __init__(self):
+        self.inputs = []
+        self.signs = {"checked": True, "age_band": "2_months_to_5_years", "present": []}
+        self.passages = [{"id": "a", "source": "imci-chart-booklet.pdf", "page": 12,
+                          "text": "Give extra fluids.", "score": 0.8}]
+        self.answer = {"from_guidelines": "Give extra fluids [1].", "general": "",
+                       "possible_causes": ["diarrhoea"], "cited": [1], "urgent": False,
+                       "is_clarification": False}
+
+    def _updates(self):
+        return [("child_signs_node", {"child_signs": self.signs}),
+                ("child_retrieve_node", {"child_passages": self.passages}),
+                ("child_answer_node", {"child_answer": self.answer})]
+
+    def invoke(self, state):
+        self.inputs.append(state)
+        return {**state, **{k: v for _, update in self._updates() for k, v in update.items()}}
+
+    def stream(self, state, stream_mode="updates"):
+        self.inputs.append(state)
+        for node, update in self._updates():
+            yield {node: update}
+
+
+@pytest.fixture
+def child_graph():
+    return FakeChildGraph()
+
+
 class FakeJev:
-    """Stands in for Jev. Unreachable unless a test gives it probabilities, so by default the
-    word list names the complaint, and no test reaches the network."""
+    """Stands in for Jev. Unreachable unless a test gives it probabilities (follow-up's one
+    question) or answers (child mode's several), so by default the word list names the
+    complaint, child mode shows its unchecked banner, and no test reaches the network."""
 
     def __init__(self):
         self.calls = []
         self.probabilities = None
+        self.answers = None
 
     def choose(self, state, instructions, criteria):
         self.calls.append({"state": state, "instructions": instructions, "criteria": criteria})
@@ -134,17 +169,25 @@ class FakeJev:
             raise ConnectionError("Jev is not reachable in tests")
         return self.probabilities
 
+    def decide(self, state, questions):
+        self.calls.append({"state": state, "questions": questions})
+        if self.answers is None:
+            raise ConnectionError("Jev is not reachable in tests")
+        return self.answers
+
 
 @pytest.fixture(autouse=True)
 def jev(monkeypatch):
     fake = FakeJev()
     monkeypatch.setattr(jev_service, "choose", fake.choose)
+    monkeypatch.setattr(jev_service, "decide", fake.decide)
     return fake
 
 
 @pytest.fixture
-def client(graph):
+def client(graph, child_graph):
     app.state.graph = graph
+    app.state.child_graph = child_graph
     with TestClient(app) as c:
         yield c
 

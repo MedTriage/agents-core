@@ -210,3 +210,30 @@ FOLLOWUP_JEV_MIN_PROBABILITY = 0.8
 JEV_URL = "https://openrouter.ai/api/alpha/decisions"
 JEV_MODEL = "typesafe/jev-1.13"
 JEV_TIMEOUT_SECONDS = 5
+
+# --- Child-health mode (Q&A from IMNCI/WHO documents; no triage) ---
+# Built by `python -m app.rag.child_ingest <folder of PDFs>`. Gitignored, like snomed.db: the
+# documents' licences have not been checked for redistribution.
+CHILD_INDEX_DIR = os.getenv(
+    "CHILD_INDEX_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "child_index"),
+)
+# Local and English-only (67 MB, downloaded once on first use). Hindi or Hinglish questions
+# would need a different model.
+CHILD_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+CHILD_CHUNK_SIZE = 800
+CHILD_CHUNK_OVERLAP = 100
+# Measured 2026-11-07 on the three indexed documents (../child-retrieval-check/check.py: 28
+# questions the guidelines cover, 12 they don't, relevance by topic words). No cut-off
+# separates the two: covered questions top out at 0.650 to 0.838, uncovered ones at 0.505
+# to 0.687. 0.63 keeps a relevant passage for all 28 covered questions (the lowest, "vomits
+# everything", a danger sign, sits 0.02 above it) and gives 5 of the 12 uncovered no passage
+# at all. Raising it loses danger-sign questions first: 0.66 drops "vomits everything", 0.69
+# drops "had a fit" and "very sleepy". Top 5 keeps every covered question's relevant passage
+# (the deepest, a sore throat, is 5th); 81% of kept passages are relevant at 0.63.
+CHILD_TOP_K = 5
+CHILD_MIN_SCORE = 0.63
+# Recall first: Jev's probability that a danger sign is described at or above which it counts.
+# Also a guess. The age band is used only when Jev is at least this sure of it.
+CHILD_SIGN_MIN_PROBABILITY = 0.3
+CHILD_AGE_MIN_PROBABILITY = 0.8
