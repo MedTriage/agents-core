@@ -12,6 +12,7 @@ from app.db.models import (
     GENDERS, Conversation, EmailOutbox, LoginAttempt, Message, Profile, RecordItem, ReviewCase, User,
 )
 from app.db.session import get_db
+from app.services import prescriptions, readings
 from app.services.outbox import enqueue
 from app.services.patient_context import PROFILE_LIST
 from app.services.security import verify_password
@@ -120,6 +121,8 @@ def export(user: User = Depends(require_patient), db: Session = Depends(get_db))
         "record": [{"kind": i.kind, "text": i.text, "status": i.status,
                     "first_mentioned_at": i.first_mentioned_at.isoformat(),
                     "last_mentioned_at": i.last_mentioned_at.isoformat()} for i in record],
+        "readings": [readings.reading_out(r) for r in readings.of_patient(db, user.id)],
+        "prescriptions": prescriptions.issued_for_export(db, user.id),
         "conversations": [
             {"id": str(c.id), "title": c.title, "created_at": c.created_at.isoformat(),
              "messages": [message_out(m, cases.get(m.id)) for m in db.scalars(

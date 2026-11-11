@@ -11,12 +11,14 @@ profile does not list it, marked unconfirmed.
 """
 import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Checkin, Episode, Profile, RecordItem
+from app.config import PRESCRIPTION_BACKGROUND_DAYS
+from app.db.models import Checkin, Episode, Prescription, Profile, RecordItem
+from app.services import readings
 from app.services.followup_content import COMPLAINTS, OVERALL_WORDS
 
 # Scribe record field → record kind. Symptoms, demographics and notes are deliberately
@@ -104,6 +106,21 @@ def _profile_lines(profile: Profile | None) -> list[str]:
     ]
 
 
+def _prescription_lines(db: Session, user_id) -> list[str]:
+    """What doctors issued through MedTriage recently. Listed apart from the profile, which only
+    the patient writes. Issued only: a draft is not something the patient was told to take."""
+    since = datetime.now(timezone.utc) - timedelta(days=PRESCRIPTION_BACKGROUND_DAYS)
+    issued = db.scalars(select(Prescription).where(
+        Prescription.patient_id == user_id, Prescription.status == "issued", Prescription.issued_at >= since,
+    ).order_by(Prescription.issued_at.desc())).all()
+    lines = []
+    for rx in issued:
+        for med in (rx.final or {}).get("medications") or []:
+            lines.append(f"- {med['drug']} {med['dose']}, {med['route']}, {med['frequency']}, for {med['duration']} "
+                         f"(issued {readings.on_day(rx.issued_at.date())} by {rx.issued_by_name})")
+    return ["Prescribed by a doctor through MedTriage:", *lines] if lines else []
+
+
 def _unconfirmed_lines(db: Session, user_id, conversation_id) -> list[str]:
     """Inferred items from OTHER conversations that the patient has neither accepted into
     the profile nor dismissed. This conversation's own items are already in its scribe
@@ -149,6 +166,7 @@ def build_background(db: Session, user_id, conversation_id) -> str | None:
     """The PATIENT BACKGROUND block for every turn, first turn included. None when
     nothing is known, so prompts carry no empty section."""
     uid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
-    sections = [_profile_lines(db.get(Profile, uid)), _unconfirmed_lines(db, uid, conversation_id),
+    sections = [_profile_lines(db.get(Profile, uid)), readings.background_lines(db, uid),
+                _prescription_lines(db, uid), _unconfirmed_lines(db, uid, conversation_id),
                 _followup_lines(db, conversation_id)]
     return "\n\n".join("\n".join(s) for s in sections if s) or None

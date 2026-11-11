@@ -19,6 +19,7 @@ os.environ["DATABASE_URL"] = re.sub(r"/[^/]+$", "/medtriage_test", _base_url)
 os.environ["EMAIL_WORKER_ENABLED"] = "0"
 os.environ["FOLLOWUP_WORKER_ENABLED"] = "0"
 os.environ["FOLLOWUP_DEMO_SECONDS"] = "0"  # real NICE timing in tests, whatever .env says
+os.environ["PRESCRIPTION_DEMO_INSTANT"] = "0"  # drafts stay with the doctor, whatever .env says
 # Safety net: a test that accidentally reaches the real graph must fail, not spend money.
 # load_dotenv() never overrides a variable that is already set.
 os.environ["OPENROUTER_API_KEY"] = "test-key-no-network"
@@ -70,6 +71,15 @@ class FakeGraph:
         self.diagnosis = "Common cold"
         self.intent = "clinical_query"
         self.clarification = False
+        # What the prescriber returned on a level_2 turn; None means no draft came back.
+        self.prescription = None
+        self.prescription_problems = []
+
+    def _prescriber_update(self):
+        if self.level != "level_2" or (self.prescription is None and not self.prescription_problems):
+            return {}
+        return {"prescription": self.prescription, "prescription_attempts": 1,
+                "prescription_problems": self.prescription_problems}
 
     def _result(self, state):
         record = self.scribe_record or {
@@ -98,6 +108,7 @@ class FakeGraph:
                                 "requires_doctor": self.level != "level_1",
                                 "ai_lock": self.level == "level_3"},
             "triage_level": self.level,
+            **self._prescriber_update(),
         }
 
     def invoke(self, state):
@@ -113,6 +124,8 @@ class FakeGraph:
             "is_emergency", "is_clarification")}}
         yield {"guardian_node": {"guardian_output": result["guardian_output"],
                                  "triage_level": result["triage_level"]}}
+        if self._prescriber_update():
+            yield {"prescriber_node": self._prescriber_update()}
 
 
 @pytest.fixture
@@ -236,11 +249,11 @@ def patient(client, email="pat@example.com", password=PASSWORD, name="Pat") -> s
     return r.json()["token"]
 
 
-def doctor(client, email="doc@example.com", password=PASSWORD, name="Dr Rao") -> str:
+def doctor(client, email="doc@example.com", password=PASSWORD, name="Dr Rao", registration=None) -> str:
     """An invited doctor who has accepted. Returns the session token."""
     from app.admin import invite_doctor
     with SessionLocal() as s:
-        invite_doctor(s, email, name)
+        invite_doctor(s, email, name, registration)
     token = link_token(outbox("doctor_invite", to=email)[-1])
     assert client.post("/auth/invite/accept", json={"token": token, "password": password}).status_code == 200
     r = client.post("/auth/login", json={"email": email, "password": password})

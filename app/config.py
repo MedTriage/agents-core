@@ -188,6 +188,15 @@ EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "MedTriage")
 EMAIL_MAX_ATTEMPTS = 5
 EMAIL_WORKER_ENABLED = os.getenv("EMAIL_WORKER_ENABLED", "1") == "1"
 
+# --- Prescriptions ---
+# THE TEST SWITCH. Off: a draft stays with the reviewing doctor. On: a patient can open the draft
+# from a level_2 answer at once, marked as not reviewed by a doctor. For trying the prescriber
+# out only: never turn it on where real patients can reach it.
+PRESCRIPTION_DEMO_INSTANT = os.getenv("PRESCRIPTION_DEMO_INSTANT", "0") == "1"
+# How long an issued prescription stays in the patient background. A guess, unmeasured: long
+# enough to cover a course of treatment and what follows it, short enough not to haunt them.
+PRESCRIPTION_BACKGROUND_DAYS = 90
+
 # --- Follow-up (check-ins after an answer) ---
 # THE DEMO TOGGLE. Unset or 0: check-ins follow NICE's timing in days, with a night-time
 # pause. A number of seconds: every wait (each check-in, the reminder, the lapse) takes

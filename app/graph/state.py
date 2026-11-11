@@ -64,6 +64,12 @@ class AgentState(TypedDict):
     guardian_output: Optional[dict]
     triage_level: Optional[str]
 
+    # Prescriber, level_2 turns only: a draft for the reviewing doctor. Never in the payload or
+    # the stored pipeline, both of which a patient can read.
+    prescription: Optional[dict]
+    prescription_attempts: Optional[int]
+    prescription_problems: Optional[list]
+
     # Per-branch re-retrieval loop. The orchestrator is the sole writer of both:
     # parallel branches must not write shared keys (LangGraph rejects concurrent
     # updates to the same channel within a superstep).

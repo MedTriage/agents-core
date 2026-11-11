@@ -122,6 +122,14 @@ python -m app.rag.child_ingest data/child_docs
 
 This builds `data/child_index/` with a local English embedding model (downloaded once, about 67 MB). The documents and the index are gitignored. Without the index the mode still answers, but only from general knowledge, which is labelled as such.
 
+### Patient dashboard and prescriptions
+
+`/dashboard` shows a patient their follow-up calendar, prescriptions and the health stats they enter (weight, height, pulse, blood pressure). The latest of each stat goes into the patient background, so the agents and the reviewing doctor see it.
+
+On a level_2 answer, a prescriber agent drafts a prescription after the guardian. It goes to the reviewing doctor, who edits and issues it under their name and registration number. The patient sees nothing until then, and can print what was issued from `/prescriptions/<id>`.
+
+To try the prescriber without a doctor, set `PRESCRIPTION_DEMO_INSTANT=1` and restart the API. Patients can then open a level_2 draft at once, marked as not reviewed by a doctor, and the server logs a warning at startup. Never turn it on where real patients can reach it.
+
 ### Doctor accounts
 
 Doctors are invited from the command line; there is no public doctor sign-up. The invitation email is sent by the running API.

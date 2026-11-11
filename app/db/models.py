@@ -4,8 +4,8 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, String, Text,
-    UniqueConstraint, Uuid, func,
+    BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, Numeric, String,
+    Text, UniqueConstraint, Uuid, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -18,6 +18,10 @@ RECORD_STATUSES = ("inferred", "suggested", "accepted", "dismissed")
 CASE_STATUSES = ("pending", "verified", "rejected")
 # triage: the full pipeline. child: Q&A from IMNCI/WHO documents, with no triage level.
 CONVERSATION_MODES = ("triage", "child")
+READING_KINDS = ("weight", "height", "pulse", "blood_pressure")
+# draft: the prescriber's, for the doctor. issued: the doctor's, for the patient. discarded:
+# the case was rejected, or the doctor issued no medicine.
+PRESCRIPTION_STATUSES = ("draft", "issued", "discarded")
 
 
 def _in(column: str, values) -> str:
@@ -39,6 +43,8 @@ class User(Base):
     password_hash: Mapped[str | None] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(16))
     name: Mapped[str] = mapped_column(String(200))
+    # A doctor's medical council registration, printed on what they issue. Optional.
+    registration_number: Mapped[str | None] = mapped_column(String(64))
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -261,3 +267,44 @@ class Checkin(Base):
     new_text: Mapped[str | None] = mapped_column(Text)
     # resolved | scheduled | doctor | urgent | retriage | reassess | lapsed | postponed | stopped
     outcome: Mapped[str | None] = mapped_column(String(16))
+
+
+class HealthReading(Base):
+    """A number the patient entered on their dashboard. Kept as a history for the chart; the
+    latest of each kind reaches the agents through the patient background."""
+    __tablename__ = "health_readings"
+    __table_args__ = (CheckConstraint(_in("kind", READING_KINDS), name="kind_valid"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    value: Mapped[float] = mapped_column(Numeric(5, 1))
+    # Blood pressure's diastolic; empty for every other kind.
+    value2: Mapped[float | None] = mapped_column(Numeric(5, 1))
+    # A date, not a moment: nobody knows the minute, and a date cannot shift between time zones.
+    measured_on: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Prescription(Base):
+    """A prescription for one held answer. Its own table rather than part of the message's
+    pipeline, because a patient can read the pipeline and must not see a draft. What was issued
+    and who issued it are copied here, so the sheet stays true if the doctor's account goes."""
+    __tablename__ = "prescriptions"
+    __table_args__ = (CheckConstraint(_in("status", PRESCRIPTION_STATUSES), name="rx_status_valid"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("review_cases.id", ondelete="CASCADE"), unique=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"))
+    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="draft", server_default="draft")
+    draft: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    problems: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    final: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    doctor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    issued_by_name: Mapped[str | None] = mapped_column(String(200))
+    issued_by_registration: Mapped[str | None] = mapped_column(String(64))
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

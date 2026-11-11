@@ -17,7 +17,7 @@ from app.config import TURN_BUSY_MINUTES, TURNS_PER_HOUR
 from app.db.models import Conversation, Message, Profile, User
 from app.db.session import SessionLocal
 from app.graph.nodes.scribe_node import RECORD_KEYS
-from app.services import followup
+from app.services import followup, prescriptions
 from app.services.child_health_content import compose
 from app.services.explain import build_explanation
 from app.services.patient_context import build_background, sync_record
@@ -31,6 +31,8 @@ _PIPELINE_KEYS = ("intent_type", "intent_confidence", "parametric_output", "kgra
                   "mcp_output", "orchestrator_output", "orchestrator_decision", "guardian_output",
                   "is_emergency")
 _LEVELS = ("level_1", "level_2", "level_3")
+# The prescriber's output. The payload is otherwise the graph's result, and a patient receives it.
+_DRAFT_KEYS = ("prescription", "prescription_attempts", "prescription_problems")
 
 
 @dataclass
@@ -188,9 +190,11 @@ def finish_turn(turn: Turn, result: dict) -> dict:
             sync_record(db, conversation.user_id, conversation.id, record)
         conversation.title = conversation.title or (result.get("title") or None)
 
+        link = None
         if level == "level_2":
-            open_case(db, assistant, conversation.user_id, state.get("patient_background"),
-                      turn.profile_updated_at)
+            case = open_case(db, assistant, conversation.user_id, state.get("patient_background"),
+                             turn.profile_updated_at)
+            link = prescriptions.link_out(prescriptions.save_draft(db, case, result))
         elif level == "level_3":
             conversation.locked = True
 
@@ -202,12 +206,13 @@ def finish_turn(turn: Turn, result: dict) -> dict:
         message_id = assistant.id
 
     return {
-        **result,
+        **{k: v for k, v in result.items() if k not in _DRAFT_KEYS},
         "triage_level": level,
         "explanation": explanation,
         "conversation_id": state["conversation_id"],
         "message_id": message_id,
         "followup": watched,
+        "prescription": link,
     }
 
 

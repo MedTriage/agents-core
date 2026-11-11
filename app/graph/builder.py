@@ -1,5 +1,5 @@
 # Graph builder
-from langgraph.graph import StateGraph
+from langgraph.graph import END, StateGraph
 from app.graph.state import AgentState
 
 from app.graph.nodes.scribe_node import scribe_node
@@ -10,6 +10,7 @@ from app.graph.nodes.mcp_node import mcp_node
 from app.graph.nodes.dst_node import dst_node
 from app.graph.nodes.orchestrator_node import orchestrator_node
 from app.graph.nodes.guardian_node import guardian_node
+from app.graph.nodes.prescriber_node import prescriber_node
 
 # Branches that fan out from the intent router and fan back in to the orchestrator. Keys
 # match the branch names the orchestrator uses in its hints.
@@ -42,6 +43,16 @@ def route_after_orchestrator(state: AgentState):
     return retry_nodes or ["guardian_node"]
 
 
+def route_after_guardian(state: AgentState):
+    """A case held for a doctor gets a draft prescription for that doctor. Level_1 answers carry
+    none, level_3 goes straight to emergency advice, and it runs after the guardian so a draft
+    can never move a triage level."""
+    level = state.get("triage_level") or (state.get("guardian_output") or {}).get("triage_level")
+    if level == "level_2" and state.get("intent_type") != "chitchat":
+        return "prescriber_node"
+    return END
+
+
 def build_graph():
     builder = StateGraph(AgentState)
 
@@ -53,6 +64,7 @@ def build_graph():
     builder.add_node("dst_node", dst_node)
     builder.add_node("orchestrator_node", orchestrator_node)
     builder.add_node("guardian_node", guardian_node)
+    builder.add_node("prescriber_node", prescriber_node)
 
     builder.set_entry_point("scribe_node")
     builder.add_edge("scribe_node", "intent_router")
@@ -81,6 +93,7 @@ def build_graph():
         [*BRANCH_NODES.values(), "guardian_node"],
     )
 
-    builder.set_finish_point("guardian_node")
+    builder.add_conditional_edges("guardian_node", route_after_guardian, ["prescriber_node", END])
+    builder.set_finish_point("prescriber_node")
 
     return builder.compile()

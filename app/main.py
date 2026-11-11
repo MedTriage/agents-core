@@ -1,18 +1,25 @@
 # Main application entry point
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import auth, conversations, doctor, followups, me, triage
-from app.config import EMAIL_WORKER_ENABLED, FOLLOWUP_WORKER_ENABLED
+from app.api import auth, conversations, dashboard, doctor, followups, me, triage
+from app.config import EMAIL_WORKER_ENABLED, FOLLOWUP_WORKER_ENABLED, PRESCRIPTION_DEMO_INSTANT
 from app.graph.builder import build_graph
 from app.graph.child_builder import build_child_graph
 from app.services import followup
 from app.services.mailer import start_worker
 
 
+log = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    if PRESCRIPTION_DEMO_INSTANT:
+        log.warning("PRESCRIPTION_DEMO_INSTANT is on: patients can see prescriptions no doctor has "
+                    "reviewed. For testing only.")
     # Emails are queued with the events that cause them and sent from here, so a slow or
     # unconfigured SMTP server never holds up a request.
     stops = [start_worker() if EMAIL_WORKER_ENABLED else None,
@@ -27,6 +34,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(me.router)
+app.include_router(dashboard.router)
 app.include_router(conversations.router)
 app.include_router(triage.router)
 app.include_router(doctor.router)

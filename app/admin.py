@@ -1,6 +1,6 @@
 """Admin tasks, command line only — there is deliberately no admin web UI.
 
-    python -m app.admin invite-doctor doctor@example.com --name "Dr Rao"
+    python -m app.admin invite-doctor doctor@example.com --name "Dr Rao" --registration WBMC-12345
 """
 import argparse
 
@@ -16,11 +16,12 @@ def main() -> None:
     invite = sub.add_parser("invite-doctor", help="create a doctor account and email an invitation")
     invite.add_argument("email")
     invite.add_argument("--name", required=True)
+    invite.add_argument("--registration", help="medical council registration, printed on what they issue")
     args = parser.parse_args()
 
     with SessionLocal() as db:
         try:
-            user = invite_doctor(db, args.email, args.name)
+            user = invite_doctor(db, args.email, args.name, args.registration)
         except EmailTaken:
             parser.exit(1, f"{args.email} already has a patient account.\n")
     print(f"Invitation queued for {user.email}. It is sent by the API's email worker.")

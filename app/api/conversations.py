@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_patient
 from app.db.models import Checkin, Conversation, Episode, Message, ReviewCase, User
 from app.db.session import get_db
-from app.services import followup
+from app.services import followup, prescriptions
 from app.services.turns import TurnRefused, own_conversation
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -80,6 +80,7 @@ def get_conversation(conversation_id: str, user: User = Depends(require_patient)
         "mode": conversation.mode,
         "messages": [message_out(m, cases.get(m.id)) for m in messages],
         "followup": followup.episode_out(db, followup.latest_episode(db, conversation.id)),
+        "prescriptions": prescriptions.links_for_conversation(db, conversation.id),
     }
 
 

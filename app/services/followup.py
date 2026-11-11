@@ -106,6 +106,33 @@ def episode_out(db: Session, episode: Episode | None) -> dict | None:
     }
 
 
+def calendar_out(db: Session, episode: Episode) -> dict:
+    """The episode with its dates, for the patient's calendar. Only the next check-in has a fixed
+    date: each later one counts from when the one before it is answered, so those are "expected".
+    A check-in nobody answered is "missed", never counted as an answer."""
+    entries = []
+    due_at = None
+    for checkin in db.scalars(select(Checkin).where(Checkin.episode_id == episode.id).order_by(Checkin.id)):
+        if checkin.answered_at is not None:
+            entries.append({"kind": "answered", "at": checkin.answered_at.isoformat(), "overall": checkin.overall})
+        elif checkin.outcome == "lapsed":
+            entries.append({"kind": "missed", "at": checkin.opened_at.isoformat()})
+        elif checkin.outcome is None:
+            due_at = checkin.opened_at
+            entries.append({"kind": "due", "at": due_at.isoformat()})
+    if episode.state == "active":
+        if episode.next_checkin_at is not None:
+            entries.append({"kind": "upcoming", "at": episode.next_checkin_at.isoformat()})
+        moment = episode.next_checkin_at or due_at
+        days = episode.checkin_days
+        for number in range(episode.checkins_done + 1, len(days)):
+            if moment is None:
+                break
+            moment += _wait(days=days[number] - days[number - 1])
+            entries.append({"kind": "expected", "at": moment.isoformat()})
+    return {**episode_out(db, episode), "conversation_id": str(episode.conversation_id), "entries": entries}
+
+
 _JEV_INSTRUCTIONS = ("Which of these illnesses is the patient being treated for? Judge from the "
                      "diagnosis first, then their current conditions and symptoms.")
 _JEV_CRITERIA = {

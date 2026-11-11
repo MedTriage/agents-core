@@ -189,7 +189,7 @@ def reset_password(db: Session, raw: str, password: str) -> bool:
 
 # ── doctors ──────────────────────────────────────────────────────────────────────────
 
-def invite_doctor(db: Session, email: str, name: str) -> User:
+def invite_doctor(db: Session, email: str, name: str, registration: str | None = None) -> User:
     """Create (or re-invite) a doctor account. Only reachable from the admin CLI."""
     email = normalize_email(email)
     user = db.scalar(select(User).where(User.email == email))
@@ -199,6 +199,8 @@ def invite_doctor(db: Session, email: str, name: str) -> User:
         user = User(email=email, role="doctor", name=name.strip())
         db.add(user)
         db.flush()
+    if registration:
+        user.registration_number = registration.strip()
     token = _issue_token(db, user, "invite", timedelta(days=INVITE_TOKEN_DAYS))
     enqueue(db, user.email, "doctor_invite", name=user.name, link=_link("/invite", token))
     db.commit()

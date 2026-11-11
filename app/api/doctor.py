@@ -16,8 +16,10 @@ from app.api.me import profile_out
 from app.config import APP_BASE_URL
 from app.db.models import AccessLog, Conversation, Message, Profile, ReviewCase, User
 from app.db.session import get_db
-from app.services import followup
+from app.services import followup, prescriptions
 from app.services.outbox import enqueue
+from app.services.prescriptions import FinalPrescription
+from app.services.review import case_question
 
 router = APIRouter(prefix="/doctor", tags=["doctor"])
 public = APIRouter(tags=["status"])
@@ -26,6 +28,10 @@ public = APIRouter(tags=["status"])
 class ReviewIn(BaseModel):
     status: Literal["verified", "rejected"]
     notes: str | None = Field(default=None, max_length=4000)
+    # The doctor's version of the prescription. Left out, approving issues the draft as it stands.
+    prescription: FinalPrescription | None = None
+    # The doctor has seen the allergy conflict and is prescribing anyway.
+    confirm_allergy: bool = False
 
 
 def _visible(doctor: User):
@@ -46,16 +52,6 @@ def _uuid(value: str) -> uuid.UUID:
         raise HTTPException(404, "Case not found.")
 
 
-def _question(db: Session, case: ReviewCase) -> str:
-    """The patient message the case's answer replied to."""
-    return db.scalar(
-        select(Message.content)
-        .where(Message.conversation_id == case.conversation_id, Message.role == "user",
-               Message.id < case.message_id)
-        .order_by(Message.id.desc()).limit(1)
-    ) or ""
-
-
 def _log(db: Session, doctor: User, action: str, case: ReviewCase) -> None:
     db.add(AccessLog(actor_id=doctor.id, action=action, case_id=case.id, patient_id=case.patient_id))
 
@@ -68,10 +64,15 @@ def list_cases(doctor: User = Depends(require_doctor), db: Session = Depends(get
     ).all()
     names = dict(db.execute(select(User.id, User.name).where(
         User.id.in_({c.patient_id for c in cases}))).all()) if cases else {}
+    drafts = prescriptions.for_cases(db, [c.id for c in cases]) if cases else {}
+    flagged = {c.id for c in cases if prescriptions.hospital_flag(drafts.get(c.id))}
+    # Stable, so the oldest stays first within each group.
+    cases = sorted(cases, key=lambda c: (c.status != "pending", c.id not in flagged))
     return [
         {"id": str(c.id), "status": c.status, "created_at": c.created_at.isoformat(),
          "reviewed_at": c.reviewed_at.isoformat() if c.reviewed_at else None,
-         "patient_name": names.get(c.patient_id), "question": _question(db, c)}
+         "patient_name": names.get(c.patient_id), "question": case_question(db, c),
+         "hospital_flag": c.id in flagged}
         for c in cases
     ]
 
@@ -104,6 +105,7 @@ def get_case(case_id: str, doctor: User = Depends(require_doctor), db: Session =
         "background": (case.context_snapshot or {}).get("background"),
         "profile": profile_out(profile) if profile else None,
         "profile_changed_since": changed,
+        "prescription": prescriptions.doctor_view(prescriptions.for_case(db, case.id)),
     }
 
 
@@ -113,6 +115,15 @@ def review_case(case_id: str, body: ReviewIn, doctor: User = Depends(require_doc
     case = _case(db, doctor, case_id)
     if case.status != "pending":
         raise HTTPException(409, "This case has already been reviewed.")
+
+    try:
+        prescriptions.decide(db, case, doctor, body.status == "verified", body.prescription, body.confirm_allergy)
+    except prescriptions.NotIssuable as incomplete:
+        raise HTTPException(422, str(incomplete))
+    except prescriptions.AllergyConflict as conflict:
+        names = ", ".join(f"{c['drug']} (stated allergy: {c['allergy']})" for c in conflict.conflicts)
+        raise HTTPException(409, {"code": "allergy_conflict", "conflicts": conflict.conflicts,
+                                  "message": f"This conflicts with an allergy: {names}."})
 
     case.status = body.status
     case.notes = body.notes
